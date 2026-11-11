@@ -11,5 +11,5 @@
 //  Leave it empty ('') to try the app on one device without any login.
 // ---------------------------------------------------------------------------
 window.MEDMON_CONFIG = {
-  WEB_APP_URL: 'https://script.google.com/macros/s/AKfycbx3cv-AGBWJTbmIaeYvXABeiIzU9Os8MW2xdz9IcJiYLZxQAeRaVHd5QeMIuKoKNVWR/exec'   // e.g. 'https://script.google.com/macros/s/AKfycb.../exec'
+  WEB_APP_URL: 'https://script.google.com/macros/s/AKfycbxDcHLzrXe2e_mA2GPf4pRSn5nFE4cBfW-wU7hScVYYMnJgoDRUfEwJPLctGip4P8TX/exec'   // e.g. 'https://script.google.com/macros/s/AKfycb.../exec'
 };
