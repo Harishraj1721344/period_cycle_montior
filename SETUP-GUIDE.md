@@ -156,9 +156,34 @@ You do not need Android Studio or anything on your PC; GitHub builds both files 
 | Change my password | Apps Script → Project Settings → Script properties → edit `APP_PASSWORD`, then run **`signOutEverywhere`** (signs out all phones / PCs) |
 | Lost my phone | Same as above: change `APP_PASSWORD`, run `signOutEverywhere` |
 | Wrong password too often (blocked) | Wait 15 minutes, or run **`unlockLogin`** in Apps Script |
-| Get reminder mails in a different Gmail | In `Code.gs` set `NOTIFY_EMAIL = 'name@gmail.com'` → Deploy → Manage deployments → New version |
+| Get reminder mails in a different Gmail | App → **Settings → Mail** → type the address → *Save & send test mail* |
+| Stop the “missed tablet” or “take now” mails | App → **Settings → Mail** → untick the box → *Save* |
+| Give another person (e.g. Nithya) her own login | See **Logins for other people** below |
+| Remove a person's login | Delete their row in the **Users** tab – they are signed out at once |
+| Change another person's password | Type the new password in the `password` column of their row in the **Users** tab |
 | Put the app link in the reminder mails | In `Code.gs` set `APP_URL` to your GitHub Pages address → new version |
 | Update the app | Change files on GitHub → website updates in ~1 minute. Run **Build apps** again for new APK / installer. |
+
+## Logins for other people
+
+Your own login (`APP_USER` / `APP_PASSWORD`) is the **owner**: it shows every person's records.
+Anyone you add in the **Users** tab of the Google Sheet gets a login that shows **only their own records** – this is checked in Google's server, so it cannot be bypassed from the web page.
+
+1. Paste the latest `backend/Code.gs` into Apps Script, **Save**, then **Deploy → Manage deployments → Edit → New version → Deploy**.
+2. Run **`setup`** once more. It adds a **Users** tab to the Sheet.
+3. In the **Users** tab fill one row per person:
+
+   | user | person | email | password | passHash |
+   |---|---|---|---|---|
+   | nithya | Nithya | nithya@gmail.com | *(a password)* | *(leave empty)* |
+
+   - `user` = what she types to sign in. `person` = the name her medicines and periods are saved under – it must match the **Person** name already used in the app for her old records.
+   - `email` = where her reminder and missed-tablet mails go (she can change it in **Settings → Mail**).
+4. Run **`saveUsers`** in Apps Script. The password disappears from the sheet and only a scrambled value stays in `passHash`. (It also happens by itself the next time anybody signs in.)
+
+**Mails:** each person gets a mail at each tablet time and a “You missed your medicine” mail when a tablet is still not marked 3 hours after its time. The owner gets a copy of every person's mail.
+
+**Files:** a report file opens on the device that uploaded it. On another device it opens through Google Drive, which only works when signed in to the Google account that owns the Sheet.
 
 ## If something goes wrong
 
@@ -177,7 +202,9 @@ You do not need Android Studio or anything on your PC; GitHub builds both files 
 
 ## Security – what is and is not protected
 
-- **Protected:** your records. They sit in your Google Sheet and are only returned after a correct sign-in (checked in Google's server, not in the web page). Wrong guesses are slowed down and blocked after 5 tries.
+- **Protected:** your records. They sit in your Google Sheet and are only returned after a correct sign-in (checked in Google's server, not in the web page). Wrong guesses are slowed down and blocked after 5 tries per user name.
+- **Separated:** a login from the **Users** tab can read, change and delete only its own person's rows. Their passwords are stored as salted hashes, never as readable text.
+- **Cleaned:** everything saved to the Sheet is stored as plain text (no formulas), and the web page only loads its own scripts.
 - **Public on purpose:** the app's code, `config.js` and the Web app URL. They contain no secrets.
 - **Never** put your password into any file you upload to GitHub. It belongs only in *Script properties*.
 - Keep the Google Sheet and the Drive folder **private** (not shared with anyone).

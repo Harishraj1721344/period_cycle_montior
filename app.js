@@ -99,7 +99,7 @@ const ui = {
   date: todayStr(), lastToday: todayStr(), calMonth: todayStr().slice(0, 7),
   rep: { from: addDays(todayStr(), -6), to: todayStr(), med: '' },
   docCat: '', docSearch: '', medFilter: '',
-  editingMed: null, editingPeriod: null, editingDoc: null, pendingFiles: [],
+  editingMed: null, editingPeriod: null, editingDoc: null, pendingFiles: [], mail: null,
   upload: {}   // fileId -> 'uploading' | 'error'
 };
 
@@ -113,11 +113,16 @@ const configured = () => !!backendUrl();
 const authed = () => !!(S.auth && S.auth.token && S.auth.expires > Date.now());
 const isNative = () => !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
 let locked = false;                              // true while the sign-in screen is showing
-const defaultPerson = () => S.ui.person !== '*' ? S.ui.person : (S.settings.person || 'Me');
+// A login from the Users tab is tied to one person: it sees and saves only that person's records
+// (the backend enforces this; here it only keeps the screens tidy). The owner's login sees everyone.
+const lockedPerson = () => authed() && !S.auth.admin && S.auth.person ? S.auth.person : '';
+const defaultPerson = () => lockedPerson() || (S.ui.person !== '*' ? S.ui.person : (S.settings.person || 'Me'));
 const periodPerson = defaultPerson;
 const personOk = p => S.ui.person === '*' || p === S.ui.person;
+const safeLink = u => /^https:\/\//.test(u || '') ? u : '';          // never open javascript: or other odd links
 
 function persons() {
+  if (lockedPerson()) return [lockedPerson()];
   const set = new Set([S.settings.person || 'Me']);
   S.medicines.forEach(m => m.person && set.add(m.person));
   S.periods.forEach(p => p.person && set.add(p.person));
@@ -377,6 +382,8 @@ async function flush() {
 }
 
 function applyRemote(j) {
+  const me = lockedPerson();
+  if (me) ['medicines', 'logs', 'periods', 'files'].forEach(k => (j[k] || []).forEach(r => { r.person = me; }));
   S.medicines = (j.medicines || []).map(rowToMed).filter(Boolean);
   S.logs = {};
   (j.logs || []).forEach(r => { if (r.id) S.logs[r.id] = rowToLog(r); });
@@ -496,7 +503,7 @@ async function openDoc(id) {
     const url = URL.createObjectURL(blob);
     if (!window.open(url, '_blank')) toast('This file could not be opened in a new tab here', 'err');
     setTimeout(() => URL.revokeObjectURL(url), 120000);
-  } else if (f.driveUrl) window.open(f.driveUrl, '_blank', 'noopener');
+  } else if (safeLink(f.driveUrl)) window.open(safeLink(f.driveUrl), '_blank', 'noopener');
   else toast('This file is not available on this device', 'err');
 }
 
@@ -511,7 +518,7 @@ function showImage(title, blob) {
 async function downloadDoc(id) {
   const f = S.files.find(x => x.id === id); if (!f) return;
   const blob = await idb.get(id);
-  if (!blob) { if (f.driveUrl) window.open(f.driveUrl, '_blank', 'noopener'); return; }
+  if (!blob) { if (safeLink(f.driveUrl)) window.open(safeLink(f.driveUrl), '_blank', 'noopener'); return; }
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob); a.download = f.fileName || f.title;
   document.body.appendChild(a); a.click(); a.remove();
@@ -541,7 +548,15 @@ async function doLogin(e) {
     const user = $('#loginUser').value.trim();
     const j = await post({ action: 'login', user, password: $('#loginPass').value });
     if (!j.ok) throw new Error(j.error || 'Sign-in failed');
-    S.auth = { token: j.token, expires: j.expires, user: j.user || user };
+    const who = j.user || user;
+    if (S.settings.lastUser && S.settings.lastUser !== who) {           // a different person signs in on this device:
+      const settings = S.settings;                                      // nothing of the previous one may stay or be uploaded
+      S = { ...defaults(), settings };
+      await idb.clear();
+    }
+    S.settings.lastUser = who;
+    S.auth = { token: j.token, expires: j.expires, user: who, person: j.person || '', admin: j.role ? j.role === 'admin' : true };
+    ui.mail = null;
     save();
     $('#loginPass').value = '';
     hideLogin();
@@ -682,11 +697,12 @@ function tick() {
  * ================================================================= */
 function renderHeader() {
   $('#todayLabel').textContent = new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
-  const list = persons();
-  if (S.ui.person !== '*' && !list.includes(S.ui.person)) S.ui.person = '*';
+  const list = persons(), me = lockedPerson();
+  if (me || (S.ui.person !== '*' && !list.includes(S.ui.person))) S.ui.person = '*';
   const sel = $('#personFilter');
-  sel.innerHTML = `<option value="*">Everyone</option>` + list.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
-  sel.value = S.ui.person;
+  sel.innerHTML = me ? `<option value="*">${esc(me)}</option>` : `<option value="*">Everyone</option>` + list.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
+  sel.value = S.ui.person; sel.disabled = !!me;
+  ['#mPerson', '#pPerson', '#dPerson'].forEach(s => { $(s).readOnly = !!me; });
   $('#personList').innerHTML = list.map(p => `<option value="${esc(p)}">`).join('');
   renderPill();
 }
@@ -1123,7 +1139,7 @@ function renderReports() {
   $('#rMed').innerHTML = `<option value="">All medicines</option>` + meds.map(m => `<option value="${esc(m.id)}">${esc(m.name)} (${esc(m.person)})</option>`).join('');
   $('#rMed').value = ui.rep.med;
   const sheet = $('#openSheetBtn');
-  sheet.hidden = !S.settings.sheetUrl; sheet.href = S.settings.sheetUrl || '#';
+  sheet.hidden = !safeLink(S.settings.sheetUrl) || !!lockedPerson(); sheet.href = safeLink(S.settings.sheetUrl) || '#';
 
   const rows = buildReport(), c = k => rows.filter(r => r.status === k).length;
   const taken = c('taken'), skipped = c('skipped'), missed = c('missed'), due = c('due'), counted = taken + skipped + missed;
@@ -1231,7 +1247,7 @@ function renderDocs() {
   const groupOf = f => sort === 'name' ? '' : fmtDate(f.date, { month: 'long', year: 'numeric' });
   $('#docList').innerHTML = grouped(list, groupOf, f => {
     const isPdf = f.mime === 'application/pdf' || /\.pdf$/i.test(f.fileName);
-    const thumb = f.thumb ? `<img src="${esc(f.thumb)}" alt="">` : isPdf ? 'PDF' : ico('image');
+    const thumb = /^data:image\/(jpeg|png|webp);base64,/.test(f.thumb) ? `<img src="${esc(f.thumb)}" alt="">` : isPdf ? 'PDF' : ico('image');
     const up = ui.upload[f.id];
     const cloud = f.driveId ? `<span class="badge running">${ico('cloud', 'sm')}In Drive</span>`
       : up === 'uploading' ? '<span class="badge upcoming">Uploading…</span>'
@@ -1338,8 +1354,35 @@ function renderSettings() {
   $('#urlWrap').hidden = !!CFG.WEB_APP_URL;
   $('#sSheet').value = S.settings.sheetUrl; $('#sPerson').value = S.settings.person;
   $('#accountCard').hidden = !configured();
-  $('#accountUser').textContent = S.auth ? S.auth.user : '';
+  $('#accountUser').textContent = S.auth ? S.auth.user + (lockedPerson() ? ` (${lockedPerson()})` : '') : '';
+  $('#backendCard').hidden = !!lockedPerson();                 // only the owner connects the Sheet
+  $('#sPersonWrap').hidden = !!lockedPerson();
+  $('#mailCard').hidden = !(configured() && authed());
+  if (configured() && authed()) loadMail();
   notifyState();
+}
+
+/* ----- Settings > Mail: where this login's reminder and missed-tablet mails go ----- */
+function mailMsg(text, kind = '') { const el = $('#mailMsg'); el.textContent = text; el.className = 'msg ' + kind; }
+function showMail(m) {
+  ui.mail = m;
+  if (document.activeElement !== $('#sMail')) $('#sMail').value = m.email || '';
+  $('#sMailDue').checked = m.due !== false; $('#sMailMissed').checked = m.missed !== false;
+}
+async function loadMail() {
+  if (ui.mail) return showMail(ui.mail);
+  try { showMail((await api('getMail')).mail || {}); }
+  catch (e) { mailMsg(/Unknown action/.test(e.message) ? 'Update backend/Code.gs in Apps Script and deploy a new version to use mail settings.' : 'Could not load mail settings: ' + e.message, 'err'); }
+}
+async function saveMail(thenTest) {
+  const mail = { email: $('#sMail').value.trim(), due: $('#sMailDue').checked, missed: $('#sMailMissed').checked };
+  mailMsg('Saving…');
+  try {
+    showMail((await api('setMail', { mail })).mail);
+    if (!thenTest) return mailMsg('Saved ✔', 'good');
+    const t = await api('testMail');
+    mailMsg(`Test mail sent to ${t.to} ✔`, 'good');
+  } catch (e) { mailMsg(e.message, 'err'); }
 }
 function readSettings() {
   if (!CFG.WEB_APP_URL) S.settings.url = $('#sUrl').value.trim();
@@ -1511,6 +1554,8 @@ function bind() {
     const ok = await pull(); connMsg(ok ? 'Downloaded from the Sheet ✔' : 'Failed: ' + syncMsg, ok ? 'good' : 'err');
   };
   $('#sPerson').addEventListener('change', () => { readSettings(); renderHeader(); });
+  $('#mailForm').addEventListener('submit', e => { e.preventDefault(); saveMail(false); });
+  $('#mailTestBtn').onclick = () => saveMail(true);
   $('#notifyBtn').onclick = async () => {
     const LN = nativeNotif();
     if (LN) { try { await LN.requestPermissions(); } catch (e) { /* ignore */ } await scheduleNative(); notifyState(); return toast('Phone reminders are set for the next 14 days'); }

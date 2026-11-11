@@ -49,8 +49,8 @@ function doPost(e) {
     try {
       if (req.action === 'login') out = login_(req);
       else {
-        checkToken_(req.token);                       // every other call needs a valid sign-in
-        out = req.action === 'logout' ? logout_(req) : handle_(req);
+        var ctx = checkToken_(req.token);             // every other call needs a valid sign-in
+        out = req.action === 'logout' ? logout_(req) : handle_(req, ctx);
       }
     } finally { lock.releaseLock(); }
   } catch (err) {
@@ -59,19 +59,34 @@ function doPost(e) {
   return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON);
 }
 
-function handle_(req) {
+/** ctx = who is signed in: { user, person, admin }. Only the admin sees and changes every person's rows. */
+function handle_(req, ctx) {
   switch (req.action) {
     case 'ping':
-      return { ok: true, message: 'Connected', user: Session.getEffectiveUser().getEmail() };
+      return { ok: true, message: 'Connected', user: ctx.admin ? Session.getEffectiveUser().getEmail() : ctx.user };
     case 'getAll':
-      return { ok: true, medicines: readAll_('Medicines'), logs: readAll_('DoseLog'), periods: readAll_('Periods'), files: readAll_('Files') };
+      return { ok: true, medicines: mine_('Medicines', ctx), logs: mine_('DoseLog', ctx), periods: mine_('Periods', ctx), files: mine_('Files', ctx) };
     case 'bulk':
-      return applyOps_(req.ops || []);
+      return applyOps_(req.ops || [], ctx);
     case 'uploadFile':
-      return uploadFile_(req);
+      return uploadFile_(req, ctx);
+    case 'getMail':
+      return { ok: true, mail: mailPrefs_(ctx) };
+    case 'setMail':
+      return setMail_(req, ctx);
+    case 'testMail':
+      return testMail_(ctx);
     default:
       throw new Error('Unknown action: ' + req.action);
   }
+}
+
+function samePerson_(a, b) { return String(a).trim().toLowerCase() === String(b).trim().toLowerCase(); }
+
+/** Rows of a tab that the signed-in user may see. */
+function mine_(name, ctx) {
+  var rows = readAll_(name);
+  return ctx.admin ? rows : rows.filter(function (r) { return samePerson_(r.person, ctx.person); });
 }
 
 /* ---------------------------------------------------------------
@@ -95,11 +110,55 @@ function safeEqual_(a, b) {
   return r === 0;
 }
 
+/* ----- other people's logins: the "Users" tab of the Sheet -----
+ *   user | person | email | password | passHash
+ * Type a user name, the person name their records are saved under, their e-mail and a password.
+ * At the next sign-in (or when you run saveUsers) the password is replaced by a salted hash,
+ * so no password stays readable in the Sheet. A user sees only the rows of their own person. */
+var USER_COLS = ['user', 'person', 'email', 'password', 'passHash'];
+
+function usersSheet_() {
+  var ss = SpreadsheetApp.getActive(), sh = ss.getSheetByName('Users');
+  if (!sh) {
+    sh = ss.insertSheet('Users');
+    sh.getRange(1, 1, 1, USER_COLS.length).setValues([USER_COLS])
+      .setFontWeight('bold').setBackground('#0f766e').setFontColor('#ffffff');
+    sh.setFrozenRows(1);
+    sh.getRange(1, 1, sh.getMaxRows(), USER_COLS.length).setNumberFormat('@');
+  }
+  return sh;
+}
+
+function slowHash_(salt, pass) {
+  var h = salt + ':' + pass;
+  for (var i = 0; i < 300; i++) h = hash_(salt + h);        // many rounds: guessing a stolen hash is slow
+  return h;
+}
+
+function users_() {
+  var sh = usersSheet_(), last = sh.getLastRow(), out = [];
+  if (last < 2) return out;
+  sh.getRange(2, 1, last - 1, USER_COLS.length).getValues().forEach(function (r, i) {
+    var user = String(r[0]).trim(), plain = String(r[3]), ph = String(r[4]);
+    if (!user) return;
+    if (plain) {                                             // new / changed password -> keep only its hash
+      var salt = Utilities.getUuid();
+      ph = salt + '$' + slowHash_(salt, plain);
+      sh.getRange(i + 2, 4, 1, 2).setValues([['', ph]]);
+    }
+    out.push({ user: user, person: String(r[1]).trim() || user, email: String(r[2]).trim(), passHash: ph });
+  });
+  return out;
+}
+
+/** Run from the editor after typing passwords in the Users tab, to hash them straight away. */
+function saveUsers() { users_(); }
+
 function sessions_() {
   var s = {};
   try { s = JSON.parse(PropertiesService.getScriptProperties().getProperty('sessions') || '{}'); } catch (e) { s = {}; }
   var now = Date.now();
-  Object.keys(s).forEach(function (k) { if (s[k] < now) delete s[k]; });
+  Object.keys(s).forEach(function (k) { if ((typeof s[k] === 'number' ? s[k] : s[k].e) < now) delete s[k]; });
   return s;
 }
 function saveSessions_(s) { PropertiesService.getScriptProperties().setProperty('sessions', JSON.stringify(s)); }
@@ -110,30 +169,45 @@ function login_(req) {
   if (!user || !pass) {
     throw new Error('Login is not set up yet. In Apps Script open Project Settings > Script properties and add APP_USER and APP_PASSWORD.');
   }
+  var name = String(req.user || '').trim().toLowerCase().slice(0, 100), given = String(req.password || '').slice(0, 200);
   var cache = CacheService.getScriptCache();
-  var fails = parseInt(cache.get('fails') || '0', 10);
-  if (fails >= MAX_FAILS) throw new Error('Too many wrong attempts. Please wait ' + LOCK_MIN + ' minutes and try again.');
+  var failKey = 'fails_' + hash_(name).slice(0, 24);        // counted per user name, so one person cannot lock out the others
+  var fails = parseInt(cache.get(failKey) || '0', 10), allFails = parseInt(cache.get('fails_all') || '0', 10);
+  if (fails >= MAX_FAILS || allFails >= MAX_FAILS * 6) throw new Error('Too many wrong attempts. Please wait ' + LOCK_MIN + ' minutes and try again.');
 
-  var okUser = safeEqual_(String(req.user || '').trim().toLowerCase(), user.trim().toLowerCase());
-  var okPass = safeEqual_(String(req.password || ''), pass);
-  if (!(okUser && okPass)) {
-    cache.put('fails', String(fails + 1), LOCK_MIN * 60);
+  var who = null;
+  if (safeEqual_(name, user.trim().toLowerCase())) {        // the owner (admin): sees every person
+    if (safeEqual_(given, pass)) who = { user: user.trim(), person: '', role: 'admin' };
+  } else {                                                  // someone from the Users tab: sees only their own person
+    var u = users_().filter(function (x) { return x.user.toLowerCase() === name; })[0];
+    var parts = String(u && u.passHash ? u.passHash : 'none$none').split('$');
+    if (safeEqual_(slowHash_(parts[0], given), parts[1] || '') && u && u.passHash) who = { user: u.user, person: u.person, role: 'user' };
+  }
+  if (!who) {
+    cache.put(failKey, String(fails + 1), LOCK_MIN * 60);
+    cache.put('fails_all', String(allFails + 1), LOCK_MIN * 60);
     Utilities.sleep(1000);                                  // slows down guessing
     throw new Error('Wrong user name or password');
   }
-  cache.remove('fails');
+  cache.remove(failKey);
 
   var token = Utilities.getUuid() + Utilities.getUuid();    // random, only its hash is stored
   var expires = Date.now() + SESSION_DAYS * 86400000;
-  var s = sessions_(), keys = Object.keys(s);
-  if (keys.length >= 20) { keys.sort(function (a, b) { return s[a] - s[b]; }); delete s[keys[0]]; }   // keep 20 newest
-  s[hash_(token)] = expires;
+  var s = sessions_(), keys = Object.keys(s), exp = function (k) { return typeof s[k] === 'number' ? s[k] : s[k].e; };
+  if (keys.length >= 60) { keys.sort(function (a, b) { return exp(a) - exp(b); }); delete s[keys[0]]; }   // keep 60 newest
+  s[hash_(token)] = { e: expires, u: who.user, r: who.role };
   saveSessions_(s);
-  return { ok: true, token: token, expires: expires, user: user.trim() };
+  return { ok: true, token: token, expires: expires, user: who.user, person: who.person, role: who.role };
 }
 
+/** Returns who the token belongs to, or throws. A user removed from the Users tab is signed out at once. */
 function checkToken_(token) {
-  if (!token || !sessions_()[hash_(token)]) throw authError_();
+  var v = token ? sessions_()[hash_(token)] : null;
+  if (!v) throw authError_();
+  if (typeof v === 'number' || v.r === 'admin') return { user: (v && v.u) || 'admin', person: '', admin: true };   // number = session from the older version
+  var u = users_().filter(function (x) { return x.user === v.u; })[0];
+  if (!u || !u.passHash) throw authError_();
+  return { user: u.user, person: u.person, admin: false };
 }
 
 function logout_(req) {
@@ -144,7 +218,11 @@ function logout_(req) {
 }
 
 /** Run from the editor if you locked yourself out with wrong passwords. */
-function unlockLogin() { CacheService.getScriptCache().remove('fails'); }
+function unlockLogin() {
+  var cache = CacheService.getScriptCache(), names = [PropertiesService.getScriptProperties().getProperty('APP_USER') || ''];
+  users_().forEach(function (u) { names.push(u.user); });
+  cache.removeAll(['fails_all'].concat(names.map(function (n) { return 'fails_' + hash_(n.trim().toLowerCase()).slice(0, 24); })));
+}
 
 /** Run from the editor to sign out every phone / PC (e.g. after a lost phone). Also change APP_PASSWORD. */
 function signOutEverywhere() { PropertiesService.getScriptProperties().deleteProperty('sessions'); }
@@ -197,13 +275,22 @@ function readAll_(name) {
 }
 
 function load_(name) {
-  var sh = sheet_(name), last = sh.getLastRow(), index = {};
+  var sh = sheet_(name), last = sh.getLastRow(), index = {}, owner = {}, pc = SHEETS[name].indexOf('person');
   if (last >= 2) {
-    var ids = sh.getRange(2, 1, last - 1, 1).getValues();
-    for (var i = 0; i < ids.length; i++) if (ids[i][0] !== '') index[String(ids[i][0])] = i + 2;
+    var vals = sh.getRange(2, 1, last - 1, pc + 1).getValues();          // id … person
+    for (var i = 0; i < vals.length; i++) if (vals[i][0] !== '') { index[String(vals[i][0])] = i + 2; owner[String(vals[i][0])] = String(vals[i][pc]); }
   }
   var next = Math.max(last, 1) + 1;
-  return { sh: sh, index: index, next: next, firstPending: next, pending: [], cols: SHEETS[name].length };
+  return { sh: sh, index: index, owner: owner, next: next, firstPending: next, pending: [], cols: SHEETS[name].length };
+}
+
+/** One cell value as safe text: no formulas, no over-long text, only real Drive links and picture thumbnails. */
+function clean_(sheet, header, v) {
+  var s = v === undefined || v === null ? '' : String(v);
+  if (header === 'thumb') return /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+\/=]+$/.test(s) && s.length <= 45000 ? s : '';
+  if (header === 'driveUrl') return /^https:\/\/(drive|docs)\.google\.com\//.test(s) ? s.slice(0, 500) : '';
+  s = s.slice(0, 2000);
+  return /^[=+\-@]/.test(s) ? "'" + s : s;                               // leading ' = plain text, never a formula
 }
 
 function flushPending_(t) {
@@ -215,8 +302,9 @@ function flushPending_(t) {
   t.pending = [];
 }
 
-function applyOps_(ops) {
-  var cache = {};
+/** ctx = the signed-in user. Left out (calls from inside this script) = no restriction. */
+function applyOps_(ops, ctx) {
+  var cache = {}, admin = !ctx || ctx.admin;
   function get(name) {
     if (!SHEETS[name]) throw new Error('Unknown sheet: ' + name);
     if (!cache[name]) cache[name] = load_(name);
@@ -229,10 +317,18 @@ function applyOps_(ops) {
     if (op.op === 'upsert') {
       var row = op.row;
       if (!row || !row.id) return;
-      var values = SHEETS[op.sheet].map(function (h) {
-        return row[h] === undefined || row[h] === null ? '' : String(row[h]);
-      });
       var r = t.index[row.id];
+      if (!admin) {
+        if (t.owner[row.id] !== undefined && !samePerson_(t.owner[row.id], ctx.person)) return;   // somebody else's row
+        row.person = ctx.person;                                                                  // always saved under their own name
+        if (op.sheet === 'Files') {                           // the Drive link is set by uploadFile only, never by the user
+          if (!r || r >= t.firstPending) return;
+          var link = t.sh.getRange(r, SHEETS.Files.indexOf('driveId') + 1, 1, 2).getValues()[0];
+          row.driveId = link[0]; row.driveUrl = link[1];
+        }
+      }
+      t.owner[row.id] = String(row.person || '');
+      var values = SHEETS[op.sheet].map(function (h) { return clean_(op.sheet, h, row[h]); });
       if (r && r >= t.firstPending) {
         t.pending[r - t.firstPending] = values;                 // same batch, replace
       } else if (r) {
@@ -242,6 +338,7 @@ function applyOps_(ops) {
         t.pending.push(values);
       }
     } else if (op.op === 'delete') {
+      if (!admin && !(t.owner[op.id] !== undefined && samePerson_(t.owner[op.id], ctx.person))) return;   // not theirs
       flushAll();
       var r2 = t.index[op.id];
       if (r2 && op.sheet === 'Files') trashDriveFile_(t.sh.getRange(r2, SHEETS.Files.indexOf('driveId') + 1).getValue());
@@ -276,17 +373,21 @@ function trashDriveFile_(driveId) {
   try { DriveApp.getFileById(String(driveId)).setTrashed(true); } catch (e) { /* already gone */ }
 }
 
-function uploadFile_(req) {
+function uploadFile_(req, ctx) {
   var meta = req.meta || {};
   if (!meta.id || !req.data) throw new Error('Missing file data');
+  if (!ctx.admin) meta.person = ctx.person;
 
   // a retry of an upload that already worked must not create a second Drive file
-  var already = readAll_('Files').filter(function (f) { return f.id === String(meta.id) && f.driveId; })[0];
-  if (already) return { ok: true, driveId: already.driveId, driveUrl: already.driveUrl };
+  var already = readAll_('Files').filter(function (f) { return f.id === String(meta.id); })[0];
+  if (already && !ctx.admin && !samePerson_(already.person, ctx.person)) throw new Error('This file belongs to someone else');
+  if (already && already.driveId) return { ok: true, driveId: already.driveId, driveUrl: already.driveUrl };
 
+  var mime = String(meta.mime || '');
+  if (!/^image\/[a-z0-9.+-]+$/i.test(mime) && mime !== 'application/pdf') throw new Error('Only images or PDF files can be uploaded');
   var bytes = Utilities.base64Decode(req.data);
   if (bytes.length > MAX_FILE_MB * 1024 * 1024) throw new Error('File too large (max ' + MAX_FILE_MB + ' MB)');
-  var blob = Utilities.newBlob(bytes, meta.mime || 'application/octet-stream', meta.fileName || meta.title || 'report');
+  var blob = Utilities.newBlob(bytes, mime, String(meta.fileName || meta.title || 'report').slice(0, 200));
   var file = folder_().createFile(blob);
   file.setDescription((meta.title || '') + ' | ' + (meta.person || '') + ' | ' + (meta.category || ''));
 
@@ -306,6 +407,7 @@ function setup() {
     sh.getRange(1, 1, sh.getMaxRows(), SHEETS[n].length).setNumberFormat('@');
   });
   folder_();   // creates the Drive folder for uploaded reports (also asks Drive permission)
+  usersSheet_();   // tab where you add other people's logins
 
   var ss = SpreadsheetApp.getActive();
   var def = ss.getSheetByName('Sheet1');
@@ -318,7 +420,7 @@ function setup() {
   ScriptApp.newTrigger('weeklyReport').timeBased().onWeekDay(ScriptApp.WeekDay.MONDAY).atHour(8).create();
 
   MailApp.sendEmail(recipient_(), 'Medicine Monitor is ready',
-    'Setup finished. Daily plan (7 AM), dose reminders (every 15 min) and the weekly report (Monday 8 AM) are ON.');
+    'Setup finished. Daily plan (7 AM), dose reminders and missed-dose mails (checked every 15 min) and the weekly report (Monday 8 AM) are ON.');
 
   var props = PropertiesService.getScriptProperties();
   if (!props.getProperty('APP_USER') || !props.getProperty('APP_PASSWORD')) {
@@ -346,9 +448,65 @@ function parseTimes_(str) {
     return { label: p[0], time: p[1] };
   }).filter(function (t) { return t.time; });
 }
-function recipient_() { return NOTIFY_EMAIL || Session.getEffectiveUser().getEmail(); }
+/* ----- mail settings (Settings > Mail in the app), kept in Script properties -----
+ * { "*": {email, due, missed},  "<user name>": {email, due, missed} }     "*" = the owner (admin)  */
+function mailStore_() {
+  try { return JSON.parse(PropertiesService.getScriptProperties().getProperty('mail') || '{}'); } catch (e) { return {}; }
+}
+function mailKey_(ctx) { return ctx.admin ? '*' : ctx.user.toLowerCase(); }
+
+/** Mail settings of one login, with defaults: owner -> own Gmail, user -> e-mail typed in the Users tab. */
+function mailPrefs_(ctx, store) {
+  var p = (store || mailStore_())[mailKey_(ctx)] || {}, fallback = '';
+  if (ctx.admin) fallback = NOTIFY_EMAIL || Session.getEffectiveUser().getEmail();
+  else users_().forEach(function (u) { if (u.user === ctx.user) fallback = u.email; });
+  return { email: p.email || fallback, due: p.due !== false, missed: p.missed !== false };
+}
+
+function setMail_(req, ctx) {
+  var m = req.mail || {};
+  var list = String(m.email || '').split(',').map(function (x) { return x.trim(); }).filter(String);
+  if (list.length > 3) throw new Error('At most 3 e-mail addresses');
+  list.forEach(function (a) { if (!/^[^\s@,;<>"]+@[^\s@,;<>"]+\.[^\s@,;<>"]{2,}$/.test(a) || a.length > 120) throw new Error('This is not a valid e-mail address: ' + a); });
+  var store = mailStore_();
+  store[mailKey_(ctx)] = { email: list.join(','), due: m.due !== false, missed: m.missed !== false };
+  PropertiesService.getScriptProperties().setProperty('mail', JSON.stringify(store));
+  return { ok: true, mail: mailPrefs_(ctx, store) };
+}
+
+function testMail_(ctx) {
+  var cache = CacheService.getScriptCache(), key = 'test_' + hash_(mailKey_(ctx)).slice(0, 24);
+  if (cache.get(key)) throw new Error('A test mail was just sent. Please wait a minute.');
+  var to = mailPrefs_(ctx).email;
+  if (!to) throw new Error('Save an e-mail address first');
+  cache.put(key, '1', 60);
+  MailApp.sendEmail({ to: to, subject: 'Medicine Monitor test mail', name: 'Medicine Monitor',
+    htmlBody: '<p>This address will get the tablet reminders and the “you missed a tablet” mails.</p>' });
+  return { ok: true, to: to };
+}
+
+function recipient_() { return mailPrefs_({ admin: true }).email; }
 function send_(subject, html) {
   MailApp.sendEmail({ to: recipient_(), subject: subject, htmlBody: html, name: 'Medicine Monitor' });
+}
+
+/** Sends dose mails person by person: each person gets only their own doses at their own address,
+ *  the owner gets a copy. kind = 'due' | 'missed' (each login can switch either off).
+ *  build(list) -> { subject, html } */
+function mailPeople_(doses, kind, build) {
+  var store = mailStore_(), owner = mailPrefs_({ admin: true }, store), byPerson = {}, groups = {};
+  users_().forEach(function (u) { byPerson[u.person.toLowerCase()] = mailPrefs_({ user: u.user, admin: false }, store); });
+  doses.forEach(function (d) {
+    var p = byPerson[String(d.person).trim().toLowerCase()];
+    var to = p && p[kind] && p.email ? p.email : '';
+    (groups[to] = groups[to] || []).push(d);
+  });
+  Object.keys(groups).forEach(function (to) {
+    if (!to && !owner[kind]) return;                        // nobody wants this mail
+    var m = build(groups[to]), msg = { to: to || owner.email, subject: m.subject, htmlBody: m.html, name: 'Medicine Monitor' };
+    if (to && owner[kind] && owner.email && owner.email.toLowerCase().indexOf(to.toLowerCase()) < 0) msg.cc = owner.email;
+    if (msg.to) MailApp.sendEmail(msg);
+  });
 }
 function esc_(s) {
   return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
@@ -433,30 +591,69 @@ function logIndex_() {
 /* ---------------------------------------------------------------
  * E-mail jobs (time-driven triggers created by setup())
  * ------------------------------------------------------------- */
+/** Runs every 15 minutes: "take it now" mails, then "you missed it" mails. */
 function dueDoseReminder() {
-  var now = new Date(), today = fmt_(now, 'yyyy-MM-dd'), nowMin = toMin_(fmt_(now, 'HH:mm'));
-  var logs = logIndex_();
-  var props = PropertiesService.getScriptProperties();
-  var sent = JSON.parse(props.getProperty('sent') || '{}');
+  var meds = readAll_('Medicines'), logs = logIndex_();
+  takeNowMail_(meds, logs);
+  missedMail_(meds, logs);
+}
 
-  var due = dosesFor_(readAll_('Medicines'), today).filter(function (d) {
-    var m = toMin_(d.time);
-    return m <= nowMin && nowMin - m <= REMIND_WINDOW_MIN && !logs[d.key] && !sent[d.key];
-  });
-  if (!due.length) return;
-
-  var html = '<h3>💊 Time to take your medicine</h3><ul>' + due.map(function (d) {
+function doseList_(list) {
+  return '<ul>' + list.map(function (d) {
     return '<li><b>' + esc_(d.name) + '</b>' + (d.dose ? ' – ' + esc_(d.dose) : '') +
       ' &nbsp;(' + esc_(d.label) + ', ' + time12_(d.time) + ')' +
       (d.person ? ' &nbsp;<i>' + esc_(d.person) + '</i>' : '') +
       (d.food && d.food !== 'Any time' ? ' &nbsp;· ' + esc_(d.food) : '') + '</li>';
   }).join('') + '</ul>' + (APP_URL ? '<p><a href="' + APP_URL + '">Open the app and mark as taken</a></p>' : '');
-  send_('💊 Take now: ' + due.map(function (d) { return d.name; }).join(', '), html);
+}
+function names_(list) { return list.map(function (d) { return d.name; }).join(', '); }
+
+function takeNowMail_(meds, logs) {
+  var now = new Date(), today = fmt_(now, 'yyyy-MM-dd'), nowMin = toMin_(fmt_(now, 'HH:mm'));
+  var props = PropertiesService.getScriptProperties();
+  var sent = JSON.parse(props.getProperty('sent') || '{}');
+
+  var due = dosesFor_(meds, today).filter(function (d) {
+    var m = toMin_(d.time);
+    return m <= nowMin && nowMin - m <= REMIND_WINDOW_MIN && !logs[d.key] && !sent[d.key];
+  });
+  if (!due.length) return;
+
+  mailPeople_(due, 'due', function (list) {
+    return { subject: '💊 Take now: ' + names_(list), html: '<h3>💊 Time to take your medicine</h3>' + doseList_(list) };
+  });
 
   var keep = {};
   Object.keys(sent).forEach(function (k) { if (sent[k] === today) keep[k] = today; });
   due.forEach(function (d) { keep[d.key] = today; });
   props.setProperty('sent', JSON.stringify(keep));
+}
+
+/** A dose still not marked MISSED_AFTER_MIN minutes after its time -> one "you missed it" mail. */
+function missedMail_(meds, logs) {
+  var now = new Date(), today = fmt_(now, 'yyyy-MM-dd'), yesterday = addDays_(today, -1), nowMin = toMin_(fmt_(now, 'HH:mm'));
+  var props = PropertiesService.getScriptProperties();
+  var sent = JSON.parse(props.getProperty('missedSent') || '{}');
+
+  // yesterday is checked too: a 10 PM dose becomes "missed" after midnight
+  var missed = dosesFor_(meds, yesterday).concat(dosesFor_(meds, today)).filter(function (d) {
+    var late = (d.date === today ? 0 : 1440) + nowMin - toMin_(d.time);
+    return late >= MISSED_AFTER_MIN && late <= MISSED_AFTER_MIN + 120 && !logs[d.key] && !sent[d.key];
+  });
+  if (!missed.length) return;
+
+  mailPeople_(missed, 'missed', function (list) {
+    return {
+      subject: '⚠️ Missed: ' + names_(list),
+      html: '<h3>You missed your medicine</h3><p>Nothing was marked for:</p>' + doseList_(list) +
+        '<p>If you did take it, open the app and mark it as taken. If not, follow your doctor’s advice about a missed dose.</p>'
+    };
+  });
+
+  var keep = {};
+  Object.keys(sent).forEach(function (k) { if (sent[k] >= yesterday) keep[k] = sent[k]; });
+  missed.forEach(function (d) { keep[d.key] = today; });
+  props.setProperty('missedSent', JSON.stringify(keep));
 }
 
 function morningDigest() {

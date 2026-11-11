@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Medicine &amp; Period Monitor</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' https://script.google.com https://script.googleusercontent.com; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%92%8A%3C/text%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -219,7 +221,24 @@
       <p class="muted">Signing out removes the records from this device. Everything stays in your Google Sheet.</p>
     </div>
 
-    <div class="card">
+    <div class="card" id="mailCard" hidden>
+      <h3>Mail</h3>
+      <p class="muted">Reminders for this login are sent to this address. Leave it blank to use the default address.</p>
+      <form id="mailForm" autocomplete="off">
+        <label>Send my mails to <small class="muted">(up to 3 addresses, separated by commas)</small>
+          <input type="text" id="sMail" inputmode="email" maxlength="380" placeholder="name@gmail.com">
+        </label>
+        <label class="check-line"><input type="checkbox" id="sMailMissed"> Mail me when a tablet is missed <small class="muted">(3 hours after its time, if nothing is marked)</small></label>
+        <label class="check-line"><input type="checkbox" id="sMailDue"> Mail me at each tablet time</label>
+        <div class="btn-row">
+          <button class="btn primary" type="submit">Save</button>
+          <button class="btn ghost" type="button" id="mailTestBtn">Save &amp; send test mail</button>
+        </div>
+        <p id="mailMsg" class="msg" role="status"></p>
+      </form>
+    </div>
+
+    <div class="card" id="backendCard">
       <h3>Google Sheet backend (your Excel sheet)</h3>
       <p class="muted">All medicines, dose history, periods and uploaded reports are saved in your Google Sheet (open it in Excel any time: <i>File → Download → Microsoft Excel .xlsx</i>) and in Google Drive. Steps are in <b>SETUP-GUIDE.md</b>.</p>
       <div id="urlWrap">
@@ -241,7 +260,7 @@
 
     <div class="card">
       <h3>General</h3>
-      <label>Default person name
+      <label id="sPersonWrap">Default person name
         <input id="sPerson" placeholder="Me">
       </label>
       <div class="btn-row">

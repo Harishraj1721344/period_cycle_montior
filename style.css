@@ -162,6 +162,9 @@ label { display: block; font-size: .85rem; font-weight: 600; margin-bottom: 10px
 label > input, label > select, label > textarea { margin-top: 5px; font-weight: 400; }
 label.check { display: flex; gap: 8px; align-items: flex-start; padding-top: 24px; }
 label.grow { flex: 1 1 220px; }
+label.check-line { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; font-weight: 500; }
+input[readonly] { color: var(--muted); }
+select:disabled { opacity: 1; }
 
 .card {
   background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-l);
