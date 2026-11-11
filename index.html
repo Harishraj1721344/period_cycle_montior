@@ -263,6 +263,16 @@
       <label id="sPersonWrap">Default person name
         <input id="sPerson" placeholder="Me">
       </label>
+      <fieldset id="moveWrap">
+        <legend>Move records to another name</legend>
+        <p class="muted">Use this to combine two names into one, for example everything saved under “Me” into “Nithya”.</p>
+        <div class="grid2">
+          <label>From <select id="mvFrom"></select></label>
+          <label>To <input id="mvTo" list="personList" maxlength="40" placeholder="e.g. Nithya"></label>
+        </div>
+        <div class="btn-row"><button class="btn ghost" type="button" id="mvBtn">Move records</button></div>
+        <p id="mvMsg" class="msg" role="status"></p>
+      </fieldset>
       <div class="btn-row">
         <button class="btn ghost" id="notifyBtn">Turn on pop-up reminders</button>
         <span id="notifyState" class="muted"></span>
@@ -478,7 +488,7 @@
     <h2 id="askTitle">Please confirm</h2>
     <p id="askText"></p>
     <div class="dialog-actions">
-      <button type="button" class="btn ghost" id="askNo" data-close>Cancel</button>
+      <button type="button" class="btn ghost" id="askNo">Cancel</button>
       <button type="button" class="btn primary" id="askYes">OK</button>
     </div>
   </div>

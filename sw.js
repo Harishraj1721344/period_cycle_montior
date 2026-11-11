@@ -2,7 +2,7 @@
  * ("Install app" in Chrome / Edge). Network first, so a new version on GitHub shows up at once.
  * Calls to Google (your data) are never cached.
  * Change CACHE to force every device to drop its old copy. */
-const CACHE = 'medmon-shell-v3';
+const CACHE = 'medmon-shell-v4';
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'config.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-maskable-512.png'];
 

@@ -116,17 +116,18 @@ let locked = false;                              // true while the sign-in scree
 // A login from the Users tab is tied to one person: it sees and saves only that person's records
 // (the backend enforces this; here it only keeps the screens tidy). The owner's login sees everyone.
 const lockedPerson = () => authed() && !S.auth.admin && S.auth.person ? S.auth.person : '';
-const defaultPerson = () => lockedPerson() || (S.ui.person !== '*' ? S.ui.person : (S.settings.person || 'Me'));
+const defaultPerson = () => lockedPerson() || (S.ui.person !== '*' ? S.ui.person : persons().length === 1 ? persons()[0] : (S.settings.person || 'Me'));
 const periodPerson = defaultPerson;
 const personOk = p => S.ui.person === '*' || p === S.ui.person;
 const safeLink = u => /^https:\/\//.test(u || '') ? u : '';          // never open javascript: or other odd links
 
 function persons() {
   if (lockedPerson()) return [lockedPerson()];
-  const set = new Set([S.settings.person || 'Me']);
+  const set = new Set();
   S.medicines.forEach(m => m.person && set.add(m.person));
   S.periods.forEach(p => p.person && set.add(p.person));
   S.files.forEach(f => f.person && set.add(f.person));
+  if (!set.size) set.add(S.settings.person || 'Me');
   return [...set].sort((a, b) => a.localeCompare(b));
 }
 
@@ -592,15 +593,20 @@ async function startApp(fresh) {
  * Toast, confirm, sound, notifications
  * ================================================================= */
 /** In-page “are you sure?” – resolves true only when the confirm button is pressed. */
+let askDone = null;                              // answers the question that is open now
+function answer(yes) {
+  const done = askDone; askDone = null;
+  if ($('#askDialog').open) $('#askDialog').close();
+  if (done) done(yes);
+}
 function ask(text, { title = 'Please confirm', ok = 'OK', cancel = 'Cancel', danger = false } = {}) {
+  if (askDone) answer(false);
   return new Promise(res => {
-    const d = $('#askDialog');
     $('#askTitle').textContent = title; $('#askText').textContent = text;
     $('#askYes').textContent = ok; $('#askNo').textContent = cancel;
     $('#askYes').className = 'btn ' + (danger ? 'danger solid' : 'primary');
-    d.returnValue = '';
-    d.addEventListener('close', () => res(d.returnValue === 'yes'), { once: true });
-    d.showModal();
+    askDone = res;
+    $('#askDialog').showModal();
   });
 }
 function toast(msg, kind = '') {
@@ -700,8 +706,10 @@ function renderHeader() {
   const list = persons(), me = lockedPerson();
   if (me || (S.ui.person !== '*' && !list.includes(S.ui.person))) S.ui.person = '*';
   const sel = $('#personFilter');
-  sel.innerHTML = me ? `<option value="*">${esc(me)}</option>` : `<option value="*">Everyone</option>` + list.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
-  sel.value = S.ui.person; sel.disabled = !!me;
+  const only = me || (list.length === 1 ? list[0] : '');          // one person: show the name, nothing to choose
+  if (only) S.ui.person = '*';
+  sel.innerHTML = only ? `<option value="*">${esc(only)}</option>` : `<option value="*">Everyone</option>` + list.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
+  sel.value = S.ui.person; sel.disabled = !!only;
   ['#mPerson', '#pPerson', '#dPerson'].forEach(s => { $(s).readOnly = !!me; });
   $('#personList').innerHTML = list.map(p => `<option value="${esc(p)}">`).join('');
   renderPill();
@@ -1357,9 +1365,31 @@ function renderSettings() {
   $('#accountUser').textContent = S.auth ? S.auth.user + (lockedPerson() ? ` (${lockedPerson()})` : '') : '';
   $('#backendCard').hidden = !!lockedPerson();                 // only the owner connects the Sheet
   $('#sPersonWrap').hidden = !!lockedPerson();
+  $('#moveWrap').hidden = !!lockedPerson();
+  $('#mvFrom').innerHTML = persons().map(p => `<option>${esc(p)}</option>`).join('');
   $('#mailCard').hidden = !(configured() && authed());
   if (configured() && authed()) loadMail();
   notifyState();
+}
+
+/** Puts every record of one person under another name (e.g. "Me" -> "Nithya"), here and in the Sheet. */
+async function movePerson() {
+  const from = $('#mvFrom').value, to = $('#mvTo').value.trim().replace(/\s+/g, ' ').slice(0, 40);
+  const msg = (t, k = '') => { const el = $('#mvMsg'); el.textContent = t; el.className = 'msg ' + k; };
+  if (!from || !to) return msg('Choose the name to move from and type the name to move to.', 'err');
+  if (from === to) return msg('Both names are the same.', 'err');
+  const exists = persons().includes(to);
+  if (!(await ask(`${exists ? `Combine “${from}” into “${to}”` : `Rename “${from}” to “${to}”`}?\nAll medicines, dose history, periods and report files of “${from}” will be saved under “${to}”.`, { title: 'Move records', ok: exists ? 'Combine' : 'Rename' }))) return;
+  let n = 0;
+  S.medicines.forEach(m => { if (m.person === from) { m.person = to; n++; enqueue({ op: 'upsert', sheet: 'Medicines', row: medToRow(m) }); } });
+  Object.values(S.logs).forEach(l => { if (l.person === from) { l.person = to; enqueue({ op: 'upsert', sheet: 'DoseLog', row: l }); } });
+  S.periods.forEach(p => { if (p.person === from) { p.person = to; n++; enqueue({ op: 'upsert', sheet: 'Periods', row: periodToRow(p) }); } });
+  S.files.forEach(f => { if (f.person === from) { f.person = to; n++; if (f.driveId) enqueue({ op: 'upsert', sheet: 'Files', row: fileToRow(f) }); } });
+  if ((S.settings.person || 'Me') === from) S.settings.person = to;
+  if (S.ui.person === from) S.ui.person = '*';
+  save(); $('#mvTo').value = '';
+  renderAll();
+  msg(`${plural(n, 'record')} moved to “${to}” ✔`, 'good');
 }
 
 /* ----- Settings > Mail: where this login's reminder and missed-tablet mails go ----- */
@@ -1456,7 +1486,9 @@ function go(what) {
 
 function bind() {
   $$('[data-ico]').forEach(el => { el.innerHTML = ico(el.dataset.ico); });
-  $('#askYes').onclick = () => $('#askDialog').close('yes');
+  $('#askYes').onclick = () => answer(true);
+  $('#askNo').onclick = () => answer(false);
+  $('#askDialog').addEventListener('close', () => { if (!$('#askDialog').open) answer(false); });   // closed with the Esc key
   $('#viewDialog').addEventListener('close', () => { URL.revokeObjectURL(viewUrl); $('#viewImg').removeAttribute('src'); });
   $$('.tab').forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
   $('#personFilter').addEventListener('change', e => { S.ui.person = e.target.value; save(); renderActive(); });
@@ -1556,6 +1588,7 @@ function bind() {
     const ok = await pull(); connMsg(ok ? 'Downloaded from the Sheet ✔' : 'Failed: ' + syncMsg, ok ? 'good' : 'err');
   };
   $('#sPerson').addEventListener('change', () => { readSettings(); renderHeader(); });
+  $('#mvBtn').onclick = movePerson;
   $('#mailForm').addEventListener('submit', e => { e.preventDefault(); saveMail(false); });
   $('#mailTestBtn').onclick = () => saveMail(true);
   $('#notifyBtn').onclick = async () => {
