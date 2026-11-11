@@ -1,0 +1,36 @@
+{
+  "name": "medicine-monitor",
+  "productName": "Medicine Monitor",
+  "version": "1.0.0",
+  "description": "Medicine & Period Monitor – desktop app (same screens as the website, same Google Sheet)",
+  "main": "main.js",
+  "author": "Medicine Monitor",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis --x64 --publish never"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.medicinemonitor.app",
+    "productName": "Medicine Monitor",
+    "directories": { "output": "dist" },
+    "files": ["main.js", "www/**/*", "icons/**/*"],
+    "win": {
+      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "icon": "icons/icon-512.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Medicine Monitor"
+    }
+  }
+}

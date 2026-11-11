@@ -1,0 +1,482 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Medicine &amp; Period Monitor</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%92%8A%3C/text%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Manrope:wght@700;800&display=swap">
+<link rel="stylesheet" href="style.css">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#0f766e">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Medicine Monitor">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+</head>
+<body>
+
+<!-- ============ SIGN IN (checked by your Google Apps Script) ============ -->
+<div id="loginScreen" class="login" hidden>
+  <form id="loginForm" class="login-card" autocomplete="on">
+    <div class="login-logo" data-ico="pill" aria-hidden="true"></div>
+    <h1>Medicine &amp; Period Monitor</h1>
+    <p class="muted">Sign in to open your records.</p>
+    <label>User name
+      <input id="loginUser" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+    </label>
+    <label>Password
+      <input id="loginPass" name="password" type="password" autocomplete="current-password" required>
+    </label>
+    <label class="show-pass"><input type="checkbox" id="showPass"> Show password</label>
+    <p id="loginMsg" class="msg err" role="alert"></p>
+    <button class="btn primary wide" id="loginBtn" type="submit">Sign in</button>
+  </form>
+</div>
+
+<header class="topbar">
+  <div class="wrap topbar-in">
+    <div class="brand">
+      <span class="logo" data-ico="pill" aria-hidden="true"></span>
+      <div>
+        <h1>Medicine &amp; Period Monitor</h1>
+        <p id="todayLabel"></p>
+      </div>
+    </div>
+    <div class="top-actions">
+      <label class="person-pick" title="Show records for"><span data-ico="user" aria-hidden="true"></span><span class="sr">Person</span>
+        <select id="personFilter"></select>
+      </label>
+      <button id="syncPill" class="pill off" type="button" title="Sync status – click to sync now">Local only</button>
+    </div>
+  </div>
+</header>
+
+<nav class="tabs" aria-label="Sections">
+  <div class="wrap tabs-in" role="tablist">
+    <button class="tab active" data-tab="today" role="tab"><span data-ico="clock" aria-hidden="true"></span><span>Today</span></button>
+    <button class="tab" data-tab="meds" role="tab"><span data-ico="pill" aria-hidden="true"></span><span>Medicines</span></button>
+    <button class="tab" data-tab="periods" role="tab"><span data-ico="drop" aria-hidden="true"></span><span>Periods</span></button>
+    <button class="tab" data-tab="reports" role="tab"><span data-ico="chart" aria-hidden="true"></span><span>Reports</span></button>
+    <button class="tab" data-tab="docs" role="tab"><span data-ico="file" aria-hidden="true"></span><span>Files</span></button>
+    <button class="tab" data-tab="settings" role="tab"><span data-ico="sliders" aria-hidden="true"></span><span>Settings</span></button>
+  </div>
+</nav>
+
+<main class="wrap">
+
+  <!-- ============ TODAY ============ -->
+  <section id="tab-today" class="tabpanel active">
+    <div class="datebar">
+      <div class="datebar-nav">
+        <button class="icon-btn" id="dayPrev" aria-label="Previous day"><span data-ico="left"></span></button>
+        <div class="datebar-mid">
+          <div id="dayTitle" class="day-title"></div>
+          <div id="daySub" class="muted"></div>
+        </div>
+        <button class="icon-btn" id="dayNext" aria-label="Next day"><span data-ico="right"></span></button>
+      </div>
+      <div class="datebar-jump">
+        <input type="date" id="dayPick" aria-label="Go to a date" title="Go to a date">
+        <button class="btn ghost small" id="dayToday">Today</button>
+      </div>
+    </div>
+    <div id="weekStrip" class="week" role="group" aria-label="Days of this week"></div>
+    <div class="legend" aria-hidden="true">
+      <span><i class="key ok"></i>All done</span>
+      <span><i class="key warn"></i>Due now</span>
+      <span><i class="key bad"></i>Missed</span>
+      <span><i class="key soon"></i>Still to come</span>
+    </div>
+    <div id="todaySummary"></div>
+    <div id="periodBanner"></div>
+    <div id="doseList" class="dose-list"></div>
+  </section>
+
+  <!-- ============ MEDICINES ============ -->
+  <section id="tab-meds" class="tabpanel">
+    <div class="section-head">
+      <h2>Tablets, tonics &amp; courses</h2>
+      <button class="btn primary" id="addMedBtn"><span data-ico="plus"></span>Add medicine</button>
+    </div>
+    <div class="toolbar">
+      <div class="seg" id="medFilter" role="group" aria-label="Show"></div>
+      <label class="sort">Sort by
+        <select id="medSort">
+          <option value="status">Status – running first</option>
+          <option value="new">Start date – newest first</option>
+          <option value="old">Start date – oldest first</option>
+          <option value="end">End date – finishing soonest</option>
+          <option value="name">Name – A to Z</option>
+        </select>
+      </label>
+    </div>
+    <div id="medList" class="med-list"></div>
+  </section>
+
+  <!-- ============ PERIODS ============ -->
+  <section id="tab-periods" class="tabpanel">
+    <div class="section-head">
+      <h2 id="periodTitle">Period tracker</h2>
+      <button class="btn primary" id="addPeriodBtn"><span data-ico="plus"></span>Log period</button>
+    </div>
+    <div id="periodStats" class="stat-grid"></div>
+    <div class="card">
+      <div class="cal-head">
+        <button class="icon-btn" id="calPrev" aria-label="Previous month"><span data-ico="left"></span></button>
+        <strong id="calTitle"></strong>
+        <button class="icon-btn" id="calNext" aria-label="Next month"><span data-ico="right"></span></button>
+      </div>
+      <div id="calGrid" class="cal-grid"></div>
+      <div class="legend">
+        <span><i class="dot period"></i> Period</span>
+        <span><i class="dot pred"></i> Expected</span>
+        <span><i class="dot today"></i> Today</span>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-head">
+        <h3>History</h3>
+        <label class="sort">Order
+          <select id="perSort"><option value="new">Newest first</option><option value="old">Oldest first</option></select>
+        </label>
+      </div>
+      <div id="periodTable" class="table-wrap"></div>
+    </div>
+  </section>
+
+  <!-- ============ REPORTS ============ -->
+  <section id="tab-reports" class="tabpanel">
+    <div class="section-head">
+      <h2>Reports</h2>
+      <div class="btn-row no-print">
+        <a id="openSheetBtn" class="btn ghost" target="_blank" rel="noopener" hidden>Open Google Sheet</a>
+        <button class="btn ghost" id="csvDosesBtn">Download Excel (CSV)</button>
+        <button class="btn ghost" id="csvPeriodsBtn">Periods CSV</button>
+        <button class="btn primary" id="printBtn">Print / Save PDF</button>
+      </div>
+    </div>
+    <div class="card filters no-print">
+      <label>From <input type="date" id="rFrom"></label>
+      <label>To <input type="date" id="rTo"></label>
+      <label>Medicine <select id="rMed"></select></label>
+      <div class="quick">
+        <button class="chip-btn" data-range="today">Today</button>
+        <button class="chip-btn" data-range="7">7 days</button>
+        <button class="chip-btn" data-range="30">30 days</button>
+        <button class="chip-btn" data-range="month">This month</button>
+      </div>
+    </div>
+    <div id="repHeading" class="print-only"></div>
+    <div id="repSummary" class="stat-grid"></div>
+    <div class="card"><h3>Each day at a glance</h3><div id="repDays"></div></div>
+    <div class="card"><h3>By medicine</h3><div id="repByMed" class="table-wrap"></div></div>
+    <div class="card">
+      <div class="card-head">
+        <h3>Day-by-day log</h3>
+        <label class="sort no-print">Order
+          <select id="logSort"><option value="new">Newest day first</option><option value="old">Oldest day first</option></select>
+        </label>
+      </div>
+      <div id="repDetail" class="table-wrap"></div>
+    </div>
+    <div class="card"><h3>Period summary</h3><div id="repPeriods" class="table-wrap"></div></div>
+  </section>
+
+  <!-- ============ REPORT FILES (upload) ============ -->
+  <section id="tab-docs" class="tabpanel">
+    <div class="section-head">
+      <h2>Report files</h2>
+      <button class="btn primary" id="addDocBtn"><span data-ico="upload"></span>Upload report</button>
+    </div>
+    <p class="muted">Upload lab reports, prescriptions, scan images or PDFs. When the Google backend is connected, each file is saved in your Google Drive folder <b>“Medicine Monitor Reports”</b> and listed in the <b>Files</b> tab of the sheet.</p>
+    <div class="card filters">
+      <label>Type
+        <select id="docCat"><option value="">All types</option></select>
+      </label>
+      <label class="grow">Search
+        <input type="search" id="docSearch" placeholder="title, file name, notes…">
+      </label>
+      <label>Sort by
+        <select id="docSort">
+          <option value="new">Report date – newest first</option>
+          <option value="old">Report date – oldest first</option>
+          <option value="name">Title – A to Z</option>
+        </select>
+      </label>
+    </div>
+    <div id="docList" class="doc-grid"></div>
+  </section>
+
+  <!-- ============ SETTINGS ============ -->
+  <section id="tab-settings" class="tabpanel">
+    <div class="card" id="accountCard" hidden>
+      <h3>Account</h3>
+      <p>Signed in as <b id="accountUser"></b>. You stay signed in on this device for 30 days.</p>
+      <div class="btn-row"><button class="btn danger" id="logoutBtn">Sign out</button></div>
+      <p class="muted">Signing out removes the records from this device. Everything stays in your Google Sheet.</p>
+    </div>
+
+    <div class="card">
+      <h3>Google Sheet backend (your Excel sheet)</h3>
+      <p class="muted">All medicines, dose history, periods and uploaded reports are saved in your Google Sheet (open it in Excel any time: <i>File → Download → Microsoft Excel .xlsx</i>) and in Google Drive. Steps are in <b>SETUP-GUIDE.md</b>.</p>
+      <div id="urlWrap">
+        <label>Web app URL <small class="muted">(normally set once in config.js; leave blank to use this device only)</small>
+          <input type="url" id="sUrl" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off">
+        </label>
+      </div>
+      <label>Google Sheet link <small class="muted">(optional – for the “Open Google Sheet” button)</small>
+        <input type="url" id="sSheet" placeholder="https://docs.google.com/spreadsheets/d/…" autocomplete="off">
+      </label>
+      <div class="btn-row">
+        <button class="btn primary" id="saveConnBtn">Save &amp; connect</button>
+        <button class="btn ghost" id="syncNowBtn">Sync now</button>
+        <button class="btn ghost" id="pushAllBtn">Upload this device → Sheet</button>
+        <button class="btn ghost" id="pullAllBtn">Download Sheet → this device</button>
+      </div>
+      <p id="connMsg" class="msg" role="status"></p>
+    </div>
+
+    <div class="card">
+      <h3>General</h3>
+      <label>Default person name
+        <input id="sPerson" placeholder="Me">
+      </label>
+      <div class="btn-row">
+        <button class="btn ghost" id="notifyBtn">Turn on pop-up reminders</button>
+        <span id="notifyState" class="muted"></span>
+      </div>
+      <p class="muted">Pop-up and sound reminders work while this page is open. For reminders when the page is closed, the backend sends e-mails from your Gmail (7 AM daily plan + “take now” mail at each dose time).</p>
+    </div>
+
+    <div class="card">
+      <h3>Data on this device</h3>
+      <div class="btn-row">
+        <button class="btn ghost" id="sampleBtn">Add sample data</button>
+        <button class="btn ghost" id="exportBtn">Backup (JSON)</button>
+        <label class="btn ghost file-btn">Restore backup<input type="file" id="importFile" accept="application/json" hidden></label>
+        <button class="btn danger" id="clearBtn">Clear this device</button>
+      </div>
+      <p class="muted">“Clear this device” never touches the Google Sheet.</p>
+    </div>
+  </section>
+
+</main>
+
+<!-- ============ DIALOG: medicine ============ -->
+<dialog id="medDialog">
+  <form id="medForm" class="form" autocomplete="off">
+    <h2 id="medDialogTitle">Add medicine</h2>
+    <div class="grid2">
+      <label>Person
+        <input id="mPerson" list="personList" required>
+      </label>
+      <label>Type
+        <select id="mType">
+          <option>Tablet</option><option>Capsule</option><option>Tonic</option>
+          <option>Syrup</option><option>Injection</option><option>Drops</option><option>Other</option>
+        </select>
+      </label>
+    </div>
+    <label>Medicine name
+      <input id="mName" required maxlength="80" placeholder="e.g. Paracetamol 500 mg">
+    </label>
+    <div class="grid2">
+      <label>Dose
+        <input id="mDose" maxlength="40" placeholder="1 tablet / 10 ml">
+      </label>
+      <label>Food
+        <select id="mFood">
+          <option>Any time</option><option>After food</option><option>Before food</option><option>With food</option><option>Empty stomach</option>
+        </select>
+      </label>
+    </div>
+    <label>How often?
+      <select id="mRepeat">
+        <option value="daily">Every day</option>
+        <option value="every">Every few days (e.g. every 3 days)</option>
+        <option value="weekly">On chosen days of the week (e.g. Mon &amp; Thu)</option>
+        <option value="monthday">Once a month on a date (e.g. the 15th)</option>
+        <option value="nth">Once a month on a weekday (e.g. 2nd Sunday)</option>
+      </select>
+    </label>
+    <div id="repOpts" class="rep-opts">
+      <div data-rep="every" hidden>
+        <label>Repeat every
+          <span class="inline"><input type="number" id="mEvery" min="2" max="90" value="2"> days</span>
+        </label>
+      </div>
+      <div data-rep="weekly" hidden>
+        <div class="wk" id="wkDays" role="group" aria-label="Days of the week">
+          <label><input type="checkbox" value="0">Sun</label>
+          <label><input type="checkbox" value="1">Mon</label>
+          <label><input type="checkbox" value="2">Tue</label>
+          <label><input type="checkbox" value="3">Wed</label>
+          <label><input type="checkbox" value="4">Thu</label>
+          <label><input type="checkbox" value="5">Fri</label>
+          <label><input type="checkbox" value="6">Sat</label>
+        </div>
+      </div>
+      <div data-rep="monthday" hidden>
+        <label>Day of the month
+          <input type="number" id="mMonthDay" min="1" max="31" value="1">
+          <small class="muted">In shorter months the last day of the month is used.</small>
+        </label>
+      </div>
+      <div data-rep="nth" class="grid2" hidden>
+        <label>Which one
+          <select id="mNth">
+            <option value="1">1st</option><option value="2" selected>2nd</option>
+            <option value="3">3rd</option><option value="4">4th</option><option value="-1">Last</option>
+          </select>
+        </label>
+        <label>Weekday
+          <select id="mNthDay">
+            <option value="0">Sunday</option><option value="1">Monday</option><option value="2">Tuesday</option>
+            <option value="3">Wednesday</option><option value="4">Thursday</option><option value="5">Friday</option><option value="6">Saturday</option>
+          </select>
+        </label>
+      </div>
+    </div>
+    <div class="grid3">
+      <label>Start date
+        <input type="date" id="mStart" required>
+      </label>
+      <label id="mDaysWrap">Number of days
+        <input type="number" id="mDays" min="1" max="365" value="5">
+      </label>
+      <label id="mUntilWrap" hidden>Until date <small class="muted">(blank = no end)</small>
+        <input type="date" id="mUntil">
+      </label>
+      <label class="check" id="mNoEndWrap"><input type="checkbox" id="mNoEnd"> No end date<br><small class="muted">keep going</small></label>
+    </div>
+    <fieldset>
+      <legend>Time of day</legend>
+      <div id="timeRows"></div>
+      <div class="preset-row">
+        <button type="button" class="chip-btn" data-preset="Morning">+ Morning</button>
+        <button type="button" class="chip-btn" data-preset="Afternoon">+ Afternoon</button>
+        <button type="button" class="chip-btn" data-preset="Evening">+ Evening</button>
+        <button type="button" class="chip-btn" data-preset="Night">+ Night</button>
+        <button type="button" class="chip-btn" data-preset="Daily">+ Custom time (e.g. 9:00)</button>
+      </div>
+    </fieldset>
+    <label>Notes
+      <textarea id="mNotes" rows="2" maxlength="300" placeholder="Doctor's advice, side effects to watch…"></textarea>
+    </label>
+    <p id="medError" class="msg err" role="alert"></p>
+    <div class="dialog-actions">
+      <button type="button" class="btn ghost" data-close>Cancel</button>
+      <button type="submit" class="btn primary">Save</button>
+    </div>
+  </form>
+</dialog>
+<datalist id="personList"></datalist>
+
+<!-- ============ DIALOG: period ============ -->
+<dialog id="periodDialog">
+  <form id="periodForm" class="form" autocomplete="off">
+    <h2 id="periodDialogTitle">Log period</h2>
+    <label>Person
+      <input id="pPerson" list="personList" required>
+    </label>
+    <div class="grid2">
+      <label>Start date
+        <input type="date" id="pStart" required>
+      </label>
+      <label>End date <small class="muted">(blank if still going)</small>
+        <input type="date" id="pEnd">
+      </label>
+    </div>
+    <div class="grid2">
+      <label>Flow
+        <select id="pFlow"><option>Medium</option><option>Light</option><option>Heavy</option><option>Spotting</option></select>
+      </label>
+      <label>Pain level
+        <select id="pPain">
+          <option value="0">0 – None</option><option value="1">1 – Mild</option><option value="2">2</option>
+          <option value="3">3 – Moderate</option><option value="4">4</option><option value="5">5 – Severe</option>
+        </select>
+      </label>
+    </div>
+    <label>Notes
+      <textarea id="pNotes" rows="2" maxlength="300"></textarea>
+    </label>
+    <p id="periodError" class="msg err" role="alert"></p>
+    <div class="dialog-actions">
+      <button type="button" class="btn ghost" data-close>Cancel</button>
+      <button type="submit" class="btn primary">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ============ DIALOG: report file upload ============ -->
+<dialog id="docDialog">
+  <form id="docForm" class="form" autocomplete="off">
+    <h2 id="docDialogTitle">Upload report</h2>
+    <div id="dropZone" class="drop" tabindex="0" role="button" aria-label="Choose image or PDF files">
+      <input type="file" id="dFile" accept="image/*,application/pdf,.pdf" multiple hidden>
+      <div class="drop-icon" data-ico="upload"></div>
+      <div><b>Choose image or PDF</b> or drop it here</div>
+      <small class="muted">JPG, PNG, PDF · up to 10 MB each</small>
+      <div id="dFileInfo" class="file-info"></div>
+    </div>
+    <div class="grid2">
+      <label>Person
+        <input id="dPerson" list="personList" required>
+      </label>
+      <label>Type
+        <select id="dCategory">
+          <option>Lab report</option><option>Prescription</option><option>Scan / X-ray</option>
+          <option>Discharge summary</option><option>Bill / Receipt</option><option>Other</option>
+        </select>
+      </label>
+    </div>
+    <div class="grid2">
+      <label>Title <small class="muted">(blank = file name)</small>
+        <input id="dTitle" maxlength="100" placeholder="e.g. Blood test – Nov 2026">
+      </label>
+      <label>Report date
+        <input type="date" id="dDate" required>
+      </label>
+    </div>
+    <label>Notes
+      <textarea id="dNotes" rows="2" maxlength="300"></textarea>
+    </label>
+    <p id="docError" class="msg err" role="alert"></p>
+    <div class="dialog-actions">
+      <button type="button" class="btn ghost" data-close>Cancel</button>
+      <button type="submit" class="btn primary" id="docSaveBtn">Upload</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ============ DIALOG: confirm (used instead of the browser's own pop-up) ============ -->
+<dialog id="askDialog" class="ask">
+  <div class="form">
+    <h2 id="askTitle">Please confirm</h2>
+    <p id="askText"></p>
+    <div class="dialog-actions">
+      <button type="button" class="btn ghost" id="askNo" data-close>Cancel</button>
+      <button type="button" class="btn primary" id="askYes">OK</button>
+    </div>
+  </div>
+</dialog>
+
+<!-- ============ DIALOG: picture viewer ============ -->
+<dialog id="viewDialog" class="viewer">
+  <div class="viewer-bar">
+    <strong id="viewTitle"></strong>
+    <button type="button" class="icon-btn" data-close aria-label="Close"><span data-ico="x"></span></button>
+  </div>
+  <img id="viewImg" alt="">
+</dialog>
+
+<div id="toasts" aria-live="polite"></div>
+
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

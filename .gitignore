@@ -1,0 +1,7 @@
+node_modules/
+dist/
+installers/windows/www/
+installers/windows/icons/
+installers/android/www/
+installers/android/android/
+*.apk

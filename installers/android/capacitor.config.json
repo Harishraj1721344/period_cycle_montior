@@ -1,0 +1,6 @@
+{
+  "appId": "com.medicinemonitor.app",
+  "appName": "Medicine Monitor",
+  "webDir": "www",
+  "server": { "androidScheme": "https" }
+}
