@@ -1369,10 +1369,12 @@ function showMail(m) {
   if (document.activeElement !== $('#sMail')) $('#sMail').value = m.email || '';
   $('#sMailDue').checked = m.due !== false; $('#sMailMissed').checked = m.missed !== false;
 }
+// the deployed Apps Script is older than this page: it does not know the mail actions yet
+const oldBackend = e => /Unknown action/.test(e.message) ? 'Your Google backend is an older version. Paste the new backend/Code.gs into Apps Script, then Deploy > Manage deployments > Edit > New version.' : '';
 async function loadMail() {
   if (ui.mail) return showMail(ui.mail);
   try { showMail((await api('getMail')).mail || {}); }
-  catch (e) { mailMsg(/Unknown action/.test(e.message) ? 'Update backend/Code.gs in Apps Script and deploy a new version to use mail settings.' : 'Could not load mail settings: ' + e.message, 'err'); }
+  catch (e) { mailMsg(oldBackend(e) || 'Could not load mail settings: ' + e.message, 'err'); }
 }
 async function saveMail(thenTest) {
   const mail = { email: $('#sMail').value.trim(), due: $('#sMailDue').checked, missed: $('#sMailMissed').checked };
@@ -1382,7 +1384,7 @@ async function saveMail(thenTest) {
     if (!thenTest) return mailMsg('Saved ✔', 'good');
     const t = await api('testMail');
     mailMsg(`Test mail sent to ${t.to} ✔`, 'good');
-  } catch (e) { mailMsg(e.message, 'err'); }
+  } catch (e) { mailMsg(oldBackend(e) || e.message, 'err'); }
 }
 function readSettings() {
   if (!CFG.WEB_APP_URL) S.settings.url = $('#sUrl').value.trim();
