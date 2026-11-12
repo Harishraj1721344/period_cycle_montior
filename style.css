@@ -482,6 +482,19 @@ body.locked .topbar, body.locked .tabs, body.locked main { display: none; }
   label.check { padding-top: 0; }
   .wk-num { font-size: 1.02rem; }
   .card { padding: 14px; }
+  /* fingers, not a mouse: bigger buttons, and 16px fields so the phone does not zoom in when typing */
+  input, select, textarea { font-size: 16px; }
+  .btn.small, .med-actions .btn, .chip-btn { min-height: 40px; }
+  .link-btn { min-height: 36px; padding: 6px 8px; }
+  .filters label { flex: 1 1 100%; }
+  .filters label:has(input[type=date]) { flex: 1 1 calc(50% - 6px); min-width: 0; }
+  .btn-row .btn { flex: 1 1 auto; }
+  /* tables: tighter, and the edge fades to show there is more to swipe to */
+  table { font-size: .8rem; }
+  th, td { padding: 8px 7px; }
+  th { font-size: .66rem; letter-spacing: .03em; }
+  .table-wrap { -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain; margin: 0 -14px; padding: 0 14px; }
+  dialog { max-height: calc(100dvh - 24px); }
 }
 
 @media (prefers-reduced-motion: reduce) {

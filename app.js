@@ -116,6 +116,12 @@ let locked = false;                              // true while the sign-in scree
 // A login from the Users tab is tied to one person: it sees and saves only that person's records
 // (the backend enforces this; here it only keeps the screens tidy). The owner's login sees everyone.
 const lockedPerson = () => authed() && !S.auth.admin && S.auth.person ? S.auth.person : '';
+// The owner's login named like one of the people (login "nithya", person "Nithya") opens on that person only.
+const tiedPerson = () => {
+  if (!authed() || lockedPerson()) return '';
+  const u = String(S.auth.user || '').trim().toLowerCase();
+  return persons().find(p => p.toLowerCase() === u) || '';
+};
 const defaultPerson = () => lockedPerson() || (S.ui.person !== '*' ? S.ui.person : persons().length === 1 ? persons()[0] : (S.settings.person || 'Me'));
 const periodPerson = defaultPerson;
 const personOk = p => S.ui.person === '*' || p === S.ui.person;
@@ -706,9 +712,10 @@ function renderHeader() {
   const list = persons(), me = lockedPerson();
   if (me || (S.ui.person !== '*' && !list.includes(S.ui.person))) S.ui.person = '*';
   const sel = $('#personFilter');
-  const only = me || (list.length === 1 ? list[0] : '');          // one person: show the name, nothing to choose
-  if (only) S.ui.person = '*';
-  sel.innerHTML = only ? `<option value="*">${esc(only)}</option>` : `<option value="*">Everyone</option>` + list.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
+  const tied = tiedPerson();
+  const only = me || tied || (list.length === 1 ? list[0] : '');  // one person: show the name, nothing to choose
+  if (only) S.ui.person = tied || '*';                            // tied: other names stay out of every screen
+  sel.innerHTML = only ? `<option value="${esc(S.ui.person)}">${esc(only)}</option>` : `<option value="*">Everyone</option>` + list.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
   sel.value = S.ui.person; sel.disabled = !!only;
   ['#mPerson', '#pPerson', '#dPerson'].forEach(s => { $(s).readOnly = !!me; });
   $('#personList').innerHTML = list.map(p => `<option value="${esc(p)}">`).join('');
@@ -1366,7 +1373,14 @@ function renderSettings() {
   $('#backendCard').hidden = !!lockedPerson();                 // only the owner connects the Sheet
   $('#sPersonWrap').hidden = !!lockedPerson();
   $('#moveWrap').hidden = !!lockedPerson();
-  $('#mvFrom').innerHTML = persons().map(p => `<option>${esc(p)}</option>`).join('');
+  const tied = tiedPerson(), others = persons().filter(p => p !== tied);
+  $('#mvFrom').innerHTML = (tied ? others : persons()).map(p => `<option>${esc(p)}</option>`).join('');
+  if (tied && others.length) {                                   // records under another name are hidden from this login
+    if (!$('#mvTo').value) $('#mvTo').value = tied;
+    $('#mvMsg').textContent = `Records saved under “${others.join('”, “')}” are not shown for this login. Move them to “${tied}” to see them.`;
+    $('#mvMsg').className = 'msg';
+  }
+  $('#moveWrap').hidden = !!lockedPerson() || (!!tied && !others.length);
   $('#mailCard').hidden = !(configured() && authed());
   if (configured() && authed()) loadMail();
   notifyState();
