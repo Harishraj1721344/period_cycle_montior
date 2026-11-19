@@ -35,6 +35,31 @@
     <label class="show-pass"><input type="checkbox" id="showPass"> Show password</label>
     <p id="loginMsg" class="msg err" role="alert"></p>
     <button class="btn primary wide" id="loginBtn" type="submit">Sign in</button>
+    <p class="login-links"><button type="button" class="link-btn" id="forgotLink">Forgot password?</button></p>
+    <p class="muted small">No account yet? Ask the owner to add you.</p>
+  </form>
+  <form id="forgotForm" class="login-card" autocomplete="off" hidden>
+    <div class="login-logo" data-ico="user" aria-hidden="true"></div>
+    <h1>Reset your password</h1>
+    <div id="fgStep1">
+      <p class="muted">Enter your user name or e-mail. We will e-mail you a code.</p>
+      <label>User name or e-mail
+        <input id="fgUser" autocapitalize="none" spellcheck="false" required>
+      </label>
+      <button class="btn primary wide" id="fgSend" type="submit">Send code</button>
+    </div>
+    <div id="fgStep2" hidden>
+      <p class="muted">Enter the 8-character code from the e-mail and choose a new password.</p>
+      <label>Code
+        <input id="fgCode" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" maxlength="12">
+      </label>
+      <label>New password <small class="muted">(at least 8 characters)</small>
+        <input id="fgPass" type="password" autocomplete="new-password" minlength="8" maxlength="100">
+      </label>
+      <button class="btn primary wide" id="fgReset" type="button">Change password</button>
+    </div>
+    <p id="fgMsg" class="msg" role="alert"></p>
+    <p class="login-links"><button type="button" class="link-btn" id="fgBack">Back to sign in</button></p>
   </form>
 </div>
 
@@ -122,28 +147,48 @@
   <section id="tab-periods" class="tabpanel">
     <div class="section-head">
       <h2 id="periodTitle">Period tracker</h2>
-      <button class="btn primary" id="addPeriodBtn"><span data-ico="plus"></span>Log period</button>
+      <button class="btn primary" id="logDayBtn"><span data-ico="plus"></span>Log today</button>
     </div>
-    <div id="periodStats" class="stat-grid"></div>
-    <div class="card">
-      <div class="cal-head">
-        <button class="icon-btn" id="calPrev" aria-label="Previous month"><span data-ico="left"></span></button>
-        <strong id="calTitle"></strong>
-        <button class="icon-btn" id="calNext" aria-label="Next month"><span data-ico="right"></span></button>
-      </div>
-      <div id="calGrid" class="cal-grid"></div>
-      <div class="legend">
-        <span><i class="dot period"></i> Period</span>
-        <span><i class="dot pred"></i> Expected</span>
-        <span><i class="dot today"></i> Today</span>
-      </div>
-    </div>
+    <div id="cycleCard" class="card cycle-card"></div>
+    <div id="quickCard" class="card"></div>
+
     <div class="card">
       <div class="card-head">
-        <h3>History</h3>
+        <div class="seg" id="perView" role="group" aria-label="View">
+          <button type="button" data-act="perview" data-view="cal">Calendar</button>
+          <button type="button" data-act="perview" data-view="tl">Timeline</button>
+          <button type="button" data-act="perview" data-view="trend">Trend</button>
+        </div>
+      </div>
+      <div id="perViewBody"></div>
+    </div>
+
+    <div class="card" id="padCard"></div>
+
+    <div class="card">
+      <div class="card-head"><h3>Daily records</h3>
         <label class="sort">Order
-          <select id="perSort"><option value="new">Newest first</option><option value="old">Oldest first</option></select>
+          <select id="rcSort"><option value="new">Newest first</option><option value="old">Oldest first</option></select>
         </label>
+      </div>
+      <div class="filters">
+        <label>Month <input type="month" id="rcMonth"></label>
+        <label>Year <select id="rcYear"></select></label>
+        <label>From <input type="date" id="rcFrom"></label>
+        <label>To <input type="date" id="rcTo"></label>
+      </div>
+      <div id="recList" class="rec-list"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h3>Past periods</h3>
+        <div class="btn-row">
+          <button class="btn ghost small" id="addPeriodBtn">Add period dates</button>
+          <label class="sort">Order
+            <select id="perSort"><option value="new">Newest first</option><option value="old">Oldest first</option></select>
+          </label>
+        </div>
       </div>
       <div id="periodTable" class="table-wrap"></div>
     </div>
@@ -157,6 +202,7 @@
         <a id="openSheetBtn" class="btn ghost" target="_blank" rel="noopener" hidden>Open Google Sheet</a>
         <button class="btn ghost" id="csvDosesBtn">Download Excel (CSV)</button>
         <button class="btn ghost" id="csvPeriodsBtn">Periods CSV</button>
+        <button class="btn ghost" id="csvDaysBtn">Daily log CSV</button>
         <button class="btn primary" id="printBtn">Print / Save PDF</button>
       </div>
     </div>
@@ -184,6 +230,7 @@
       </div>
       <div id="repDetail" class="table-wrap"></div>
     </div>
+    <div class="card"><h3>Cycle &amp; period analytics</h3><div id="repAnalytics"></div></div>
     <div class="card"><h3>Period summary</h3><div id="repPeriods" class="table-wrap"></div></div>
   </section>
 
@@ -218,6 +265,16 @@
       <h3>Account</h3>
       <p>Signed in as <b id="accountUser"></b>. You stay signed in on this device for 30 days.</p>
       <div class="btn-row"><button class="btn danger" id="logoutBtn">Sign out</button></div>
+      <form id="pwForm" class="pw-form" autocomplete="off" hidden>
+        <h4>Change password</h4>
+        <label>Current password <input id="pwOld" type="password" autocomplete="current-password" required></label>
+        <div class="grid2">
+          <label>New password <input id="pwNew" type="password" autocomplete="new-password" minlength="8" maxlength="100" required></label>
+          <label>Repeat new password <input id="pwNew2" type="password" autocomplete="new-password" minlength="8" maxlength="100" required></label>
+        </div>
+        <div class="btn-row"><button class="btn ghost" type="submit">Change password</button></div>
+        <p id="pwMsg" class="msg" role="status"></p>
+      </form>
       <p class="muted">Signing out removes the records from this device. Everything stays in your Google Sheet.</p>
     </div>
 
@@ -403,6 +460,34 @@
   </form>
 </dialog>
 <datalist id="personList"></datalist>
+
+<!-- ============ DIALOG: one day of the cycle ============ -->
+<dialog id="dayDialog">
+  <form id="dayForm" class="form" autocomplete="off">
+    <h2 id="dyTitle">Today</h2>
+    <fieldset class="fs"><legend>Flow</legend><div id="dyFlow" class="flow-pick"></div></fieldset>
+    <label>Pain level <output id="dyPainOut" class="pain-out"></output>
+      <input type="range" id="dyPain" min="0" max="10" step="1" value="0">
+    </label>
+    <fieldset class="fs"><legend>Mood</legend><div id="dyMood" class="chips"></div></fieldset>
+    <fieldset class="fs"><legend>Symptoms</legend><div id="dySymp" class="chips"></div></fieldset>
+    <fieldset class="fs"><legend>Pads used</legend>
+      <div class="pad-row">
+        <div class="stepper"><button type="button" id="dyMinus" aria-label="One less">&minus;</button><b id="dyPads">0</b><button type="button" id="dyPlus" aria-label="One more">+</button></div>
+        <select id="dyType" aria-label="Pad type"></select>
+      </div>
+    </fieldset>
+    <label>Notes
+      <textarea id="dyNotes" rows="3" maxlength="500" placeholder="How was your day?"></textarea>
+    </label>
+    <p id="dyMeds" class="muted small"></p>
+    <div class="dialog-actions">
+      <button type="button" class="btn danger" id="dyDel" hidden>Delete</button>
+      <button type="button" class="btn ghost" data-close>Cancel</button>
+      <button type="submit" class="btn primary">Save</button>
+    </div>
+  </form>
+</dialog>
 
 <!-- ============ DIALOG: period ============ -->
 <dialog id="periodDialog">

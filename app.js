@@ -43,6 +43,12 @@ const ICONS = {
 };
 const ico = (n, cls = '') => `<svg class="i ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[n] || ICONS.plus}</svg>`;
 const STATUS_LABEL = { taken: 'Taken', skipped: 'Skipped', missed: 'Missed', due: 'Due now', upcoming: 'Upcoming' };
+const FLOWS = ['Spotting', 'Light', 'Medium', 'Heavy'];
+const FLOW_LEVEL = { Spotting: 1, Light: 2, Medium: 3, Heavy: 4 };
+const MOODS = ['Happy', 'Calm', 'Okay', 'Low', 'Irritable', 'Anxious', 'Tired'];
+const SYMPTOMS = ['Cramps', 'Headache', 'Bloating', 'Back pain', 'Nausea', 'Fatigue', 'Tender breasts', 'Acne', 'Cravings', 'Dizziness'];
+const PAD_TYPES = ['Regular', 'Large', 'Overnight'];
+const flc = f => 'fl-' + String(f || 'x')[0].toLowerCase();
 const CATEGORIES = ['Lab report', 'Prescription', 'Scan / X-ray', 'Discharge summary', 'Bill / Receipt', 'Other'];
 
 const $ = (s, r = document) => r.querySelector(s);
@@ -71,10 +77,10 @@ const fmtSize = n => n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1
  * State (saved in localStorage)
  * ================================================================= */
 const defaults = () => ({
-  medicines: [], logs: {}, periods: [], files: [], queue: [], lastPull: 0,
+  medicines: [], logs: {}, periods: [], days: {}, files: [], queue: [], lastPull: 0,
   auth: null,                                   // { token, expires, user } after sign-in
   settings: { url: '', person: 'Me', sheetUrl: '' },
-  ui: { person: '*', tab: 'today', medSort: 'status', docSort: 'new', logSort: 'new', perSort: 'new' }
+  ui: { person: '*', tab: 'today', medSort: 'status', docSort: 'new', logSort: 'new', perSort: 'new', recSort: 'new' }
 });
 
 function load() {
@@ -98,7 +104,7 @@ function save() {
 const ui = {
   date: todayStr(), lastToday: todayStr(), calMonth: todayStr().slice(0, 7),
   rep: { from: addDays(todayStr(), -6), to: todayStr(), med: '' },
-  docCat: '', docSearch: '', medFilter: '',
+  docCat: '', docSearch: '', medFilter: '', perView: 'cal', perSel: '', rec: { from: todayStr().slice(0, 8) + '01', to: todayStr(), year: '' },
   editingMed: null, editingPeriod: null, editingDoc: null, pendingFiles: [], mail: null,
   upload: {}   // fileId -> 'uploading' | 'error'
 };
@@ -132,6 +138,7 @@ function persons() {
   const set = new Set();
   S.medicines.forEach(m => m.person && set.add(m.person));
   S.periods.forEach(p => p.person && set.add(p.person));
+  Object.values(S.days).forEach(d => d.person && set.add(d.person));
   S.files.forEach(f => f.person && set.add(f.person));
   if (!set.size) set.add(S.settings.person || 'Me');
   return [...set].sort((a, b) => a.localeCompare(b));
@@ -316,6 +323,15 @@ function rowToPeriod(r) {
   if (!r || !r.id || !isYmd(r.startDate)) return null;
   return { id: String(r.id), person: r.person || 'Me', startDate: r.startDate, endDate: isYmd(r.endDate) ? r.endDate : '', flow: r.flow || 'Medium', pain: parseInt(r.pain, 10) || 0, notes: r.notes || '' };
 }
+const dayKey = (p, d) => `${p}|${d}`;
+const dayToRow = d => ({ id: d.id, person: d.person, date: d.date, flow: d.flow, pain: d.pain, mood: d.mood, symptoms: d.symptoms.join(','), notes: d.notes, pads: d.pads, padType: d.padType });
+function rowToDay(r) {
+  if (!r || !r.id || !isYmd(r.date)) return null;
+  const person = r.person || 'Me';
+  return { id: dayKey(person, r.date), person, date: r.date, flow: FLOWS.includes(r.flow) ? r.flow : '', pain: Math.min(10, Math.max(0, parseInt(r.pain, 10) || 0)),
+    mood: r.mood || '', symptoms: String(r.symptoms || '').split(',').map(x => x.trim()).filter(Boolean), notes: r.notes || '',
+    pads: Math.min(40, Math.max(0, parseInt(r.pads, 10) || 0)), padType: PAD_TYPES.includes(r.padType) ? r.padType : 'Regular' };
+}
 const fileToRow = f => ({ id: f.id, person: f.person, title: f.title, category: f.category, date: f.date, notes: f.notes, fileName: f.fileName, mime: f.mime, size: f.size, driveId: f.driveId || '', driveUrl: f.driveUrl || '', thumb: f.thumb || '', createdAt: f.createdAt });
 function rowToFile(r) {
   if (!r || !r.id) return null;
@@ -377,7 +393,13 @@ async function flush() {
     while (S.queue.length) {
       setSync('busy');
       const batch = S.queue.slice(0, 100);
-      await api('bulk', { ops: batch });
+      try { await api('bulk', { ops: batch }); }
+      catch (e) {
+        if (!/Unknown sheet: DayLog/.test(e.message)) throw e;      // the deployed Google script is older than this page
+        S.queue = S.queue.filter(q => q.sheet !== 'DayLog'); S.settings.dayLogPending = true; save();
+        if (!ui.oldDayLog) { ui.oldDayLog = true; toast('Daily log is kept on this device only until you update backend/Code.gs in Apps Script.', 'err'); }
+        continue;
+      }
       const sent = new Set(batch);
       S.queue = S.queue.filter(q => !sent.has(q));
       save();
@@ -390,11 +412,19 @@ async function flush() {
 
 function applyRemote(j) {
   const me = lockedPerson();
-  if (me) ['medicines', 'logs', 'periods', 'files'].forEach(k => (j[k] || []).forEach(r => { r.person = me; }));
+  if (me) ['medicines', 'logs', 'periods', 'days', 'files'].forEach(k => (j[k] || []).forEach(r => { r.person = me; }));
   S.medicines = (j.medicines || []).map(rowToMed).filter(Boolean);
   S.logs = {};
   (j.logs || []).forEach(r => { if (r.id) S.logs[r.id] = rowToLog(r); });
   S.periods = (j.periods || []).map(rowToPeriod).filter(Boolean);
+  if (Array.isArray(j.days)) {                                    // an older backend sends none: keep what is on this device
+    const mine = S.days; S.days = {};
+    j.days.forEach(r => { const d = rowToDay(r); if (d) S.days[d.id] = d; });
+    if (S.settings.dayLogPending) {                               // days saved while the backend could not store them
+      Object.values(mine).forEach(d => { if (!S.days[d.id]) { S.days[d.id] = d; enqueue({ op: 'upsert', sheet: 'DayLog', row: dayToRow(d) }); } });
+      S.settings.dayLogPending = false;
+    }
+  }
   const remote = (j.files || []).map(rowToFile).filter(Boolean);
   const ids = new Set(remote.map(f => f.id));
   S.files = remote.concat(S.files.filter(f => !f.driveId && !ids.has(f.id)));   // keep files still waiting to upload
@@ -416,6 +446,7 @@ function queueAll() {
   S.medicines.forEach(m => enqueue({ op: 'upsert', sheet: 'Medicines', row: medToRow(m) }));
   Object.values(S.logs).forEach(l => enqueue({ op: 'upsert', sheet: 'DoseLog', row: l }));
   S.periods.forEach(p => enqueue({ op: 'upsert', sheet: 'Periods', row: periodToRow(p) }));
+  Object.values(S.days).forEach(d => enqueue({ op: 'upsert', sheet: 'DayLog', row: dayToRow(d) }));
   S.files.filter(f => f.driveId).forEach(f => enqueue({ op: 'upsert', sheet: 'Files', row: fileToRow(f) }));
 }
 
@@ -538,6 +569,7 @@ async function downloadDoc(id) {
  * ================================================================= */
 function showLogin(msg, isErr = true) {
   locked = true;
+  $('#loginForm').hidden = false; $('#forgotForm').hidden = true;
   document.body.classList.add('locked');
   $('#loginScreen').hidden = false;
   const m = $('#loginMsg'); m.textContent = msg || ''; m.className = 'msg' + (isErr ? ' err' : '');
@@ -570,6 +602,49 @@ async function doLogin(e) {
     await startApp(true);
   } catch (er) { m.className = 'msg err'; m.textContent = er.message; }
   finally { btn.disabled = false; }
+}
+
+const oldBackendMsg = e => /Unknown action/.test(e.message) ? 'The Google backend is an older version. The owner must paste the new backend/Code.gs into Apps Script and deploy a new version.' : e.message;
+
+function forgotView(on) {
+  $('#loginForm').hidden = on; $('#forgotForm').hidden = !on;
+  $('#fgStep1').hidden = false; $('#fgStep2').hidden = true; $('#fgMsg').textContent = ''; $('#fgMsg').className = 'msg';
+  if (on) { $('#fgUser').value = $('#loginUser').value.trim(); setTimeout(() => $('#fgUser').focus(), 50); }
+}
+async function sendResetCode(e) {
+  e.preventDefault();
+  const m = $('#fgMsg'), btn = $('#fgSend'), user = $('#fgUser').value.trim();
+  if (!user) return;
+  btn.disabled = true; m.className = 'msg'; m.textContent = 'Sending…';
+  try {
+    const j = await post({ action: 'forgot', user });
+    if (!j.ok) throw new Error(j.error || 'Could not send the code');
+    m.className = 'msg good'; m.textContent = j.message;
+    $('#fgStep1').hidden = true; $('#fgStep2').hidden = false; $('#fgCode').focus();
+  } catch (er) { m.className = 'msg err'; m.textContent = oldBackendMsg(er); }
+  finally { btn.disabled = false; }
+}
+async function resetPassword() {
+  const m = $('#fgMsg'), user = $('#fgUser').value.trim(), pw = $('#fgPass').value;
+  if (pw.length < 8) { m.className = 'msg err'; m.textContent = 'Choose a password of at least 8 characters.'; return; }
+  $('#fgReset').disabled = true; m.className = 'msg'; m.textContent = 'Changing…';
+  try {
+    const j = await post({ action: 'resetPassword', user, code: $('#fgCode').value.trim(), newPassword: pw });
+    if (!j.ok) throw new Error(j.error || 'Could not change the password');
+    $('#fgPass').value = ''; $('#fgCode').value = '';
+    $('#loginUser').value = user.includes('@') ? '' : user;
+    showLogin(j.message, false);
+  } catch (er) { m.className = 'msg err'; m.textContent = oldBackendMsg(er); }
+  finally { $('#fgReset').disabled = false; }
+}
+async function changePassword(e) {
+  e.preventDefault();
+  const m = $('#pwMsg'), a = $('#pwNew').value;
+  const say = (t, k = '') => { m.textContent = t; m.className = 'msg ' + k; };
+  if (a !== $('#pwNew2').value) return say('The two new passwords are not the same.', 'err');
+  say('Changing…');
+  try { const j = await api('changePassword', { oldPassword: $('#pwOld').value, newPassword: a }); say(j.message || 'Password changed.', 'good'); $('#pwForm').reset(); }
+  catch (er) { say(oldBackendMsg(er), 'err'); }
 }
 
 async function logout() {
@@ -1055,31 +1130,189 @@ function endMedToday(id) {
 /* ===================================================================
  * Periods
  * ================================================================= */
+/* ----- daily log: flow, pain, mood, symptoms, pads ----- */
+const dayOf = (p, d) => S.days[dayKey(p, d)] || null;
+function lastPadType(person) {
+  let best = null;
+  Object.values(S.days).forEach(d => { if (d.person === person && d.pads && (!best || d.date > best.date)) best = d; });
+  return best ? best.padType : 'Regular';
+}
+const blankDay = (person, date) => ({ id: dayKey(person, date), person, date, flow: '', pain: 0, mood: '', symptoms: [], notes: '', pads: 0, padType: lastPadType(person) });
+
+/** A day with a flow level belongs to a period: join the one it falls in, continue one that just ended, or start a new one. */
+function syncPeriodFromDay(person, date, flow) {
+  if (!flow) return;
+  const list = S.periods.filter(p => p.person === person), up = p => enqueue({ op: 'upsert', sheet: 'Periods', row: periodToRow(p) });
+  if (list.some(p => p.startDate <= date && date <= (p.endDate || addDays(p.startDate, 9)))) return;
+  const prev = list.find(p => p.endDate && addDays(p.endDate, 1) === date);
+  if (prev) { prev.endDate = date; return up(prev); }
+  const next = list.find(p => p.startDate === addDays(date, 1));
+  if (next) { next.startDate = date; return up(next); }
+  const p = { id: uid('p_'), person, startDate: date, endDate: '', flow, pain: 0, notes: '' };
+  S.periods.push(p); up(p);
+}
+
+/** Saves one day. A day with nothing in it is removed. */
+function storeDay(d) {
+  const empty = !d.flow && !d.pain && !d.mood && !d.symptoms.length && !d.notes && !d.pads;
+  if (empty) { if (S.days[d.id]) { delete S.days[d.id]; enqueue({ op: 'delete', sheet: 'DayLog', id: d.id }); } return; }
+  S.days[d.id] = d;
+  enqueue({ op: 'upsert', sheet: 'DayLog', row: dayToRow(d) });
+  syncPeriodFromDay(d.person, d.date, d.flow);
+}
+function patchDay(person, date, patch) { storeDay({ ...(dayOf(person, date) || blankDay(person, date)), ...patch }); renderAll(); }
+function quickFlow(flow) { const p = periodPerson(), t = todayStr(), d = dayOf(p, t); patchDay(p, t, { flow: d && d.flow === flow ? '' : flow }); }
+function quickPads(n) { const p = periodPerson(), t = todayStr(), d = dayOf(p, t); patchDay(p, t, { pads: Math.min(40, Math.max(0, (d ? d.pads : 0) + n)) }); }
+
+/* ----- the period tab ----- */
+const selPeriod = ps => ps.list.find(p => p.id === ui.perSel) || ps.last;
+function spanDays(p, today) {
+  const cap = addDays(p.startDate, 9), end = p.endDate || (p.startDate <= today ? (today < cap ? today : cap) : p.startDate), out = [];
+  for (let d = p.startDate, i = 0; d <= end && i < 31; d = addDays(d, 1), i++) out.push(d);
+  return out;
+}
+const dShort = (s, o) => fmtDate(s, o || { day: 'numeric', month: 'short' });
+const painWord = n => n === 0 ? 'None' : n <= 3 ? 'Mild' : n <= 6 ? 'Moderate' : n <= 8 ? 'Severe' : 'Worst';
+
 function renderPeriods() {
   const person = periodPerson(), ps = periodStats(person), today = todayStr();
   $('#periodTitle').textContent = `Period tracker – ${person}`;
-  const stats = [];
-  stats.push(`<div class="stat period"><div class="label">Last period</div><div class="value">${ps.last ? fmtDate(ps.last.startDate, { day: '2-digit', month: 'short' }) : '–'}</div><div class="sub">${ps.last ? plural(diffDays(ps.last.startDate, today), 'day') + ' ago' : 'Log your first period'}</div></div>`);
-  stats.push(`<div class="stat"><div class="label">Average cycle</div><div class="value">${ps.avgCycle ? ps.avgCycle + ' days' : '–'}</div><div class="sub">${ps.avgCycle ? 'last ' + plural(Math.min(6, ps.gaps.length), 'cycle') : 'needs 2 periods (28 d used)'}</div></div>`);
-  stats.push(`<div class="stat"><div class="label">Period length</div><div class="value">${ps.avgLen ? ps.avgLen + ' days' : '–'}</div><div class="sub">${ps.avgLen ? 'average' : 'add an end date'}</div></div>`);
-  if (ps.next) {
-    const left = diffDays(today, ps.next), cls = left < 0 ? 'bad' : left <= 3 ? 'warn' : 'ok';
-    stats.push(`<div class="stat ${cls}"><div class="label">Next expected</div><div class="value">${fmtDate(ps.next, { day: '2-digit', month: 'short' })}</div><div class="sub">${left > 0 ? 'in ' + plural(left, 'day') : left === 0 ? 'today' : plural(-left, 'day') + ' late'}</div></div>`);
-  }
-  $('#periodStats').innerHTML = stats.join('');
+  renderCycleCard(ps, today);
+  renderQuick(person, today);
+  $$('#perView button').forEach(b => { const on = b.dataset.view === ui.perView; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); });
+  $('#perViewBody').innerHTML = ui.perView === 'tl' ? timelineHtml(person, ps, today) : ui.perView === 'trend' ? trendHtml(person, ps, today) : calendarHtml(person, ps, today);
+  $('#padCard').innerHTML = padsHtml(person, ps, today);
+  renderRecords(person);
+  renderPeriodTable(ps);
+}
 
-  // calendar
+function renderCycleCard(ps, today) {
+  const last = ps.last, day = last && last.startDate <= today ? diffDays(last.startDate, today) + 1 : 0, len = ps.cycleLen;
+  const ongoing = !!last && !last.endDate && day > 0 && day <= 10;
+  const left = ps.next ? diffDays(today, ps.next) : null;
+  const nextSub = left === null ? '' : left > 0 ? 'in ' + plural(left, 'day') : left === 0 ? 'today' : plural(-left, 'day') + ' late';
+  const fact = (l, v, sub = '') => `<div class="fact"><div class="label">${l}</div><div class="value">${v}</div>${sub ? `<div class="sub">${sub}</div>` : ''}</div>`;
+  $('#cycleCard').innerHTML = `<div class="cycle-top">
+    <div class="cyc-ring" style="--p:${day ? Math.min(100, Math.round(day * 100 / len)) : 0}" role="img" aria-label="${day ? `Cycle day ${day} of about ${len}` : 'No cycle data yet'}"><div><b>${day || '–'}</b><small>${day ? 'cycle day' : 'no data'}</small></div></div>
+    <div class="cycle-facts">
+      ${fact('Period start', last ? dShort(last.startDate, { day: '2-digit', month: 'short', year: 'numeric' }) : '–')}
+      ${fact('Period end', last ? (last.endDate ? dShort(last.endDate, { day: '2-digit', month: 'short', year: 'numeric' }) : ongoing ? 'Ongoing' : '–') : '–')}
+      ${fact('Cycle length', (ps.avgCycle || len) + ' days', ps.avgCycle ? 'average of ' + plural(Math.min(6, ps.gaps.length), 'cycle') : 'default until 2 periods')}
+      ${fact('Next period', ps.next ? dShort(ps.next, { day: '2-digit', month: 'short', year: 'numeric' }) : '–', nextSub)}
+    </div></div>
+    <p class="cycle-note">${!last ? 'Tap a flow level below to log your first period day.' : ongoing ? `<b>Period is on</b> – day ${day}. ${plural(len - day < 0 ? 0 : len - day, 'day')} left in this cycle.`
+      : day ? `Cycle day <b>${day}</b> of about ${len}.` : 'Your period start date is in the future.'}</p>`;
+}
+
+function renderQuick(person, today) {
+  const d = dayOf(person, today) || blankDay(person, today);
+  $('#quickCard').innerHTML = `<div class="card-head"><h3>Today · ${dShort(today, { weekday: 'short', day: 'numeric', month: 'short' })}</h3>
+      <button class="btn ghost small" data-act="dayopen" data-date="${today}">Mood, pain &amp; notes</button></div>
+    <div class="flow-pick" role="group" aria-label="Flow today">${FLOWS.map(f => `<button type="button" class="flow-btn ${flc(f)} ${d.flow === f ? 'on' : ''}" data-act="flow" data-flow="${f}" aria-pressed="${d.flow === f}">${f}</button>`).join('')}</div>
+    <div class="pad-row"><span>Pads used today</span>
+      <div class="stepper"><button type="button" data-act="padminus" aria-label="One less">&minus;</button><b>${d.pads}</b><button type="button" data-act="padplus" aria-label="One more">+</button></div>
+      <select id="quickPadType" aria-label="Pad type">${PAD_TYPES.map(t => `<option ${t === d.padType ? 'selected' : ''}>${t}</option>`).join('')}</select></div>`;
+}
+
+function calendarHtml(person, ps, today) {
   const [y, mo] = ui.calMonth.split('-').map(Number);
-  $('#calTitle').textContent = new Date(y, mo - 1, 1).toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
   const sets = periodDaySets(person), first = new Date(y, mo - 1, 1).getDay(), dim = new Date(y, mo, 0).getDate();
   let html = ['S', 'M', 'T', 'W', 'T', 'F', 'S'].map(d => `<div class="cal-dow">${d}</div>`).join('') + '<div class="cal-day blank"></div>'.repeat(first);
   for (let d = 1; d <= dim; d++) {
-    const ds = `${y}-${pad(mo)}-${pad(d)}`;
-    html += `<div class="cal-day ${sets.actual.has(ds) ? 'period' : sets.pred.has(ds) ? 'pred' : ''} ${ds === today ? 'today' : ''}">${d}</div>`;
+    const ds = `${y}-${pad(mo)}-${pad(d)}`, e = dayOf(person, ds), future = ds > today;
+    const cls = e && e.flow ? `has-flow ${flc(e.flow)}` : sets.actual.has(ds) ? 'period' : sets.pred.has(ds) ? 'pred' : '';
+    const more = e && (e.pain || e.mood || e.symptoms.length || e.notes || e.pads);
+    html += `<button type="button" class="cal-day ${cls} ${ds === today ? 'today' : ''}" data-act="dayopen" data-date="${ds}" ${future ? 'disabled' : ''} aria-label="${esc(dShort(ds, { weekday: 'long', day: 'numeric', month: 'long' }) + (e && e.flow ? ', ' + e.flow + ' flow' : ''))}">${d}${more ? '<i class="mark"></i>' : ''}</button>`;
   }
-  $('#calGrid').innerHTML = html;
+  return `<div class="cal-head"><button class="icon-btn" data-act="calprev" aria-label="Previous month">${ico('left')}</button>
+      <strong>${new Date(y, mo - 1, 1).toLocaleDateString('en-IN', { month: 'long', year: 'numeric' })}</strong>
+      <button class="icon-btn" data-act="calnext" aria-label="Next month">${ico('right')}</button></div>
+    <div class="cal-grid">${html}</div>
+    <div class="legend">${FLOWS.map(f => `<span><i class="dot ${flc(f)}"></i>${f}</span>`).join('')}<span><i class="dot pred"></i>Expected</span><span><i class="dot today"></i>Today</span></div>
+    <p class="muted small">Tap a day to log flow, mood, pain, pads and notes. A small dot means that day has details.</p>`;
+}
 
-  // history table
+function perSelector(ps) {
+  const sel = selPeriod(ps);
+  return `<label class="sort">Period <select id="perSel">${ps.list.slice().reverse().map(p => `<option value="${esc(p.id)}" ${sel && p.id === sel.id ? 'selected' : ''}>${dShort(p.startDate, { day: 'numeric', month: 'short', year: 'numeric' })}${p.endDate ? '' : ' (ongoing)'}</option>`).join('')}</select></label>`;
+}
+
+function timelineHtml(person, ps, today) {
+  const p = selPeriod(ps);
+  if (!p) return '<p class="muted">No period yet. Log a flow level for today to start the timeline.</p>';
+  const rows = spanDays(p, today).map((date, i) => {
+    const d = dayOf(person, date);
+    return `<button type="button" class="tl-row" data-act="dayopen" data-date="${date}"><span class="tl-dot ${d && d.flow ? flc(d.flow) : 'none'}"></span>
+      <span class="tl-day"><b>Day ${i + 1}</b><small>${dShort(date, { weekday: 'short', day: 'numeric', month: 'short' })}</small></span>
+      <span class="tl-body">${d ? `${d.flow ? `<span class="flow-chip ${flc(d.flow)}">${d.flow}</span>` : ''}${d.pain ? `<span class="chip sm">Pain ${d.pain}/10</span>` : ''}${d.mood ? `<span class="chip sm">${esc(d.mood)}</span>` : ''}${d.pads ? `<span class="chip sm">${d.pads} pad${d.pads === 1 ? '' : 's'}</span>` : ''}${d.symptoms.map(x => `<span class="chip sm">${esc(x)}</span>`).join('')}${d.notes ? `<span class="tl-note">${esc(d.notes)}</span>` : ''}` : '<span class="muted">Tap to add</span>'}</span></button>`;
+  }).join('');
+  return `<div class="card-head">${perSelector(ps)}<span class="muted small">${plural(spanDays(p, today).length, 'day')}</span></div><div class="timeline">${rows}</div>`;
+}
+
+/** Column chart. items: { label, value, text?, cls?, tip } */
+function barChart(items, max) {
+  const step = items.length > 16 ? 2 : 1;
+  return `<div class="bars" style="padding-bottom:22px">${items.map((it, i) => `<div class="bcol" title="${esc(it.tip)}"><span class="bval">${esc(it.text ?? (it.value || ''))}</span><span class="bbar ${it.cls || ''}" style="height:${Math.max(it.value ? 3 : 0, Math.round(it.value * 100 / max))}%"></span><span class="blab">${i % step === 0 ? esc(it.label) : ''}</span></div>`).join('')}</div>`;
+}
+function hBars(items) {
+  const mx = Math.max(1, ...items.map(i => i.n));
+  return `<div class="hbars">${items.map(i => `<div class="hrow"><span>${esc(i.label)}</span><span class="hbar"><i style="width:${i.n * 100 / mx}%"></i></span><b>${i.n}</b></div>`).join('')}</div>`;
+}
+
+function trendHtml(person, ps, today) {
+  const p = selPeriod(ps);
+  if (!p) return '<p class="muted">No period yet. Log a flow level for today to see the trend.</p>';
+  const days = spanDays(p, today).map((date, i) => ({ date, i: i + 1, d: dayOf(person, date) }));
+  const flow = days.map(x => ({ label: 'D' + x.i, value: x.d && x.d.flow ? FLOW_LEVEL[x.d.flow] : 0, text: x.d && x.d.flow ? x.d.flow[0] : '', cls: x.d && x.d.flow ? flc(x.d.flow) : '', tip: `Day ${x.i}, ${dShort(x.date)}: ${x.d && x.d.flow ? x.d.flow : 'no flow logged'}` }));
+  const pain = days.map(x => ({ label: 'D' + x.i, value: x.d ? x.d.pain : 0, cls: 'pain', tip: `Day ${x.i}: pain ${x.d ? x.d.pain : 0}/10` }));
+  const pads = days.map(x => ({ label: 'D' + x.i, value: x.d ? x.d.pads : 0, cls: 'pads', tip: `Day ${x.i}: ${x.d ? x.d.pads : 0} pads` }));
+  return `<div class="card-head">${perSelector(ps)}</div>
+    <div class="chart-grid">
+      <div class="chart"><h4>Flow (S spotting · L light · M medium · H heavy)</h4>${barChart(flow, 4)}</div>
+      <div class="chart"><h4>Pain level (0–10)</h4>${barChart(pain, 10)}</div>
+      <div class="chart"><h4>Pads used per day</h4>${barChart(pads, Math.max(4, ...pads.map(x => x.value)))}</div>
+    </div>`;
+}
+
+function padsHtml(person, ps, today) {
+  const p = selPeriod(ps), t = dayOf(person, today);
+  let total = 0, logged = 0, peak = 0; const byType = {};
+  const span = p ? spanDays(p, today) : [];
+  span.forEach(date => { const d = dayOf(person, date); if (d && d.pads) { total += d.pads; logged++; peak = Math.max(peak, d.pads); byType[d.padType] = (byType[d.padType] || 0) + d.pads; } });
+  const stat = (l, v, sub = '') => `<div class="stat"><div class="label">${l}</div><div class="value">${v}</div><div class="sub">${sub}</div></div>`;
+  return `<div class="card-head"><h3>Pad usage</h3>${p ? `<span class="muted small">Period of ${dShort(p.startDate)}${p.endDate ? '' : ' (ongoing)'}</span>` : ''}</div>
+    <div class="stat-grid">
+      ${stat('Today', t ? t.pads : 0, 'pads')}
+      ${stat('Period total', total, 'pads')}
+      ${stat('Average per day', span.length && total ? (total / span.length).toFixed(1) : '–', span.length ? 'over ' + plural(span.length, 'day') : '')}
+      ${stat('Busiest day', peak || '–', peak ? 'pads' : '')}
+    </div>
+    <p class="muted small">${Object.keys(byType).length ? PAD_TYPES.filter(k => byType[k]).map(k => `${byType[k]} ${k.toLowerCase()}`).join(' · ') : 'Use the + button above to count pads as you go.'}</p>`;
+}
+
+/* ----- daily records, filtered by month / year / dates ----- */
+function renderRecords(person) {
+  const r = ui.rec, years = new Set([todayStr().slice(0, 4)]);
+  Object.values(S.days).forEach(d => d.person === person && years.add(d.date.slice(0, 4)));
+  S.periods.forEach(p => p.person === person && years.add(p.startDate.slice(0, 4)));
+  $('#rcYear').innerHTML = '<option value="">All years</option>' + [...years].sort().reverse().map(y => `<option>${y}</option>`).join('');
+  $('#rcYear').value = r.year || '';
+  $('#rcFrom').value = r.from; $('#rcTo').value = r.to;
+  $('#rcMonth').value = !r.year && r.from.slice(0, 7) === r.to.slice(0, 7) ? r.from.slice(0, 7) : '';
+  $('#rcSort').value = S.ui.recSort;
+  const list = Object.values(S.days).filter(d => d.person === person && d.date >= r.from && d.date <= r.to)
+    .sort((a, b) => S.ui.recSort === 'old' ? a.date.localeCompare(b.date) : b.date.localeCompare(a.date));
+  $('#recList').innerHTML = list.length ? grouped(list, d => fmtDate(d.date, { month: 'long', year: 'numeric' }), d => {
+    const meds = Object.values(S.logs).filter(l => l.person === d.person && l.date === d.date && l.status === 'taken');
+    return `<article class="rec"><button type="button" class="rec-date" data-act="dayopen" data-date="${d.date}" aria-label="Edit ${esc(fmtShort(d.date))}"><b>${parseYmd(d.date).getDate()}</b><span>${fmtDate(d.date, { weekday: 'short' })}</span></button>
+      <div class="rec-main"><div class="chips">${d.flow ? `<span class="flow-chip ${flc(d.flow)}">${d.flow}</span>` : ''}${d.pain ? `<span class="chip sm">Pain ${d.pain}/10 · ${painWord(d.pain)}</span>` : ''}${d.mood ? `<span class="chip sm">${esc(d.mood)}</span>` : ''}${d.pads ? `<span class="chip sm">${d.pads} ${esc(d.padType.toLowerCase())} pad${d.pads === 1 ? '' : 's'}</span>` : ''}</div>
+      ${d.symptoms.length ? `<p class="rec-line">${d.symptoms.map(esc).join(' · ')}</p>` : ''}
+      ${d.notes ? `<p class="rec-note">${esc(d.notes)}</p>` : ''}
+      ${meds.length ? `<p class="rec-line muted">${ico('pill', 'sm')}${meds.map(l => esc(l.medicine) + (l.takenAt ? ' ' + fmtClock(l.takenAt) : '')).join(', ')}</p>` : ''}</div></article>`;
+  }, 'day') : '<p class="muted">No daily records in these dates. Tap a day in the calendar to add one.</p>';
+}
+
+function renderPeriodTable(ps) {
   $('#perSort').value = S.ui.perSort;
   const rows = S.ui.perSort === 'old' ? ps.list.slice() : ps.list.slice().reverse();
   $('#periodTable').innerHTML = rows.length ? `<table><thead><tr><th>Start</th><th>End</th><th>Days</th><th>Cycle</th><th>Flow</th><th>Pain</th><th>Notes</th><th></th></tr></thead><tbody>` +
@@ -1090,6 +1323,49 @@ function renderPeriods() {
         <td>${esc(p.notes)}</td><td><button class="link-btn" data-act="pedit" data-id="${esc(p.id)}">Edit</button><button class="link-btn danger" data-act="pdel" data-id="${esc(p.id)}">Delete</button></td></tr>`;
     }).join('') + '</tbody></table>' : '<p class="muted">No periods logged yet.</p>';
 }
+
+/* ----- the day dialog ----- */
+let dayDraft = null;
+function openDayDialog(date) {
+  if (!isYmd(date) || date > todayStr()) return;
+  const person = periodPerson(), d0 = dayOf(person, date) || blankDay(person, date);
+  dayDraft = { ...d0, symptoms: d0.symptoms.slice() };
+  $('#dyNotes').value = dayDraft.notes;
+  paintDay();
+  const meds = Object.values(S.logs).filter(l => l.person === person && l.date === date && l.status === 'taken');
+  $('#dyMeds').textContent = meds.length ? 'Medicines taken: ' + meds.map(l => l.medicine + (l.takenAt ? ' at ' + fmtClock(l.takenAt) : '')).join(', ') : 'No medicines marked as taken on this day.';
+  $('#dayDialog').showModal();
+}
+function paintDay() {
+  const d = dayDraft;
+  const chips = (list, on, attr) => list.map(x => `<button type="button" class="chip ${on(x) ? 'on' : ''}" data-${attr}="${esc(x)}" aria-pressed="${on(x)}">${esc(x)}</button>`).join('');
+  $('#dyTitle').textContent = dShort(d.date, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  $('#dyFlow').innerHTML = FLOWS.map(f => `<button type="button" class="flow-btn ${flc(f)} ${d.flow === f ? 'on' : ''}" data-dflow="${f}" aria-pressed="${d.flow === f}">${f}</button>`).join('');
+  $('#dyMood').innerHTML = chips(MOODS, x => d.mood === x, 'dmood');
+  $('#dySymp').innerHTML = chips(SYMPTOMS, x => d.symptoms.includes(x), 'dsymp');
+  $('#dyPain').value = d.pain; $('#dyPainOut').textContent = `${d.pain} / 10 · ${painWord(d.pain)}`;
+  $('#dyPads').textContent = d.pads;
+  $('#dyType').innerHTML = PAD_TYPES.map(t => `<option ${t === d.padType ? 'selected' : ''}>${t}</option>`).join('');
+  $('#dyDel').hidden = !S.days[d.id];
+}
+function dayDialogClick(e) {
+  const t = e.target.closest('[data-dflow],[data-dmood],[data-dsymp]'); if (!t || !dayDraft) return false;
+  if (t.dataset.dflow) dayDraft.flow = dayDraft.flow === t.dataset.dflow ? '' : t.dataset.dflow;
+  else if (t.dataset.dmood) dayDraft.mood = dayDraft.mood === t.dataset.dmood ? '' : t.dataset.dmood;
+  else { const k = t.dataset.dsymp, i = dayDraft.symptoms.indexOf(k); if (i < 0) dayDraft.symptoms.push(k); else dayDraft.symptoms.splice(i, 1); }
+  paintDay(); return true;
+}
+function saveDay(e) {
+  e.preventDefault();
+  storeDay({ ...dayDraft, notes: $('#dyNotes').value.trim().slice(0, 500) });
+  $('#dayDialog').close(); renderAll(); toast('Day saved');
+}
+async function deleteDay() {
+  if (!dayDraft || !(await ask('Delete everything logged for this day?', { title: 'Delete day', ok: 'Delete', danger: true }))) return;
+  delete S.days[dayDraft.id]; enqueue({ op: 'delete', sheet: 'DayLog', id: dayDraft.id });
+  $('#dayDialog').close(); renderAll();
+}
+function shiftMonth(n) { const [y, m] = ui.calMonth.split('-').map(Number); const d = new Date(y, m - 1 + n, 1); ui.calMonth = `${d.getFullYear()}-${pad(d.getMonth() + 1)}`; renderPeriods(); }
 
 function openPeriodDialog(id) {
   const p = id ? S.periods.find(x => x.id === id) : null;
@@ -1210,6 +1486,8 @@ function renderReports() {
     }).join('') + '</tbody></table>'
     : '<p class="muted">Nothing to show.</p>';
 
+  renderAnalytics();
+
   // periods in the range
   const person = periodPerson(), ps = periodStats(person);
   const inRange = ps.list.filter(p => p.startDate >= ui.rep.from && p.startDate <= ui.rep.to);
@@ -1217,6 +1495,47 @@ function renderReports() {
     ? `<p><b>${esc(person)}</b>: average cycle ${ps.avgCycle ? ps.avgCycle + ' days' : 'not enough data'}, average length ${ps.avgLen ? ps.avgLen + ' days' : 'not enough data'}, next expected <b>${fmtShort(ps.next)}</b>.</p>` +
       (inRange.length ? `<table><thead><tr><th>Start</th><th>End</th><th>Days</th><th>Flow</th><th>Pain</th><th>Notes</th></tr></thead><tbody>${inRange.map(p => `<tr><td>${fmtShort(p.startDate)}</td><td>${p.endDate ? fmtShort(p.endDate) : 'ongoing'}</td><td>${p.endDate ? diffDays(p.startDate, p.endDate) + 1 : ''}</td><td>${esc(p.flow)}</td><td>${p.pain}/5</td><td>${esc(p.notes)}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">No periods started in the selected dates.</p>')
     : '<p class="muted">No period data.</p>';
+}
+
+function renderAnalytics() {
+  const person = periodPerson(), ps = periodStats(person), today = todayStr(), lbl = d => dShort(d);
+  const own = Object.values(S.days).filter(d => d.person === person);
+  if (!ps.list.length && !own.length) { $('#repAnalytics').innerHTML = '<p class="muted">Nothing logged yet for ' + esc(person) + '. Log periods and daily entries in the Periods tab.</p>'; return; }
+  // per period figures
+  const per = ps.list.map(p => { const days = spanDays(p, today).map(date => dayOf(person, date)).filter(Boolean); return { p, days, pads: days.reduce((a, d) => a + d.pads, 0), pain: days.filter(d => d.pain).map(d => d.pain) }; });
+  const padDays = per.reduce((a, x) => a + spanDays(x.p, today).length, 0), padTotal = per.reduce((a, x) => a + x.pads, 0);
+  const stat = (l, v, sub = '') => `<div class="stat"><div class="label">${l}</div><div class="value">${v}</div><div class="sub">${sub}</div></div>`;
+  // cycle lengths (days between starts)
+  const off = ps.gaps.length - Math.min(12, ps.gaps.length);
+  const cyc = ps.gaps.slice(-12).map((g, k) => ({ label: lbl(ps.list[off + k].startDate), value: g, cls: 'cyc', tip: `Cycle from ${fmtShort(ps.list[off + k].startDate)}: ${g} days` }));
+  const dur = per.filter(x => x.p.endDate).slice(-12).map(x => ({ label: lbl(x.p.startDate), value: diffDays(x.p.startDate, x.p.endDate) + 1, tip: `Period of ${fmtShort(x.p.startDate)}: ${diffDays(x.p.startDate, x.p.endDate) + 1} days` }));
+  // average flow on day 1, 2, 3 ... of the period
+  const byDay = {};
+  per.forEach(x => spanDays(x.p, today).forEach((date, i) => { const d = dayOf(person, date); if (d && d.flow) (byDay[i + 1] = byDay[i + 1] || []).push(FLOW_LEVEL[d.flow]); }));
+  const flowTrend = Object.keys(byDay).map(Number).sort((a, b) => a - b).slice(0, 10).map(i => { const v = avg(byDay[i]); return { label: 'D' + i, value: +v.toFixed(1), cls: flc(FLOWS[Math.min(3, Math.round(v) - 1)]), tip: `Day ${i}: average flow ${v.toFixed(1)} of 4 (${plural(byDay[i].length, 'entry')})` }; });
+  const padsPer = per.slice(-12).filter(x => x.pads).map(x => ({ label: lbl(x.p.startDate), value: x.pads, cls: 'pads', tip: `Period of ${fmtShort(x.p.startDate)}: ${x.pads} pads` }));
+  const painPer = per.slice(-12).filter(x => x.pain.length).map(x => ({ label: lbl(x.p.startDate), value: +avg(x.pain).toFixed(1), cls: 'pain', tip: `Period of ${fmtShort(x.p.startDate)}: average pain ${avg(x.pain).toFixed(1)}/10` }));
+  // symptoms and moods in the chosen dates
+  const inR = own.filter(d => d.date >= ui.rep.from && d.date <= ui.rep.to), count = {}, moods = {};
+  inR.forEach(d => { d.symptoms.forEach(k => { count[k] = (count[k] || 0) + 1; }); if (d.mood) moods[d.mood] = (moods[d.mood] || 0) + 1; });
+  const top = o => Object.entries(o).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([label, n]) => ({ label, n }));
+  const chart = (title, html) => `<div class="chart"><h4>${title}</h4>${html}</div>`;
+  const none = '<p class="muted small">Not enough data yet.</p>';
+  $('#repAnalytics').innerHTML = `<div class="stat-grid">
+      ${stat('Average cycle', ps.avgCycle ? ps.avgCycle + ' days' : '–', ps.avgCycle ? 'last ' + plural(Math.min(6, ps.gaps.length), 'cycle') : 'needs 2 periods')}
+      ${stat('Average period', ps.avgLen ? ps.avgLen + ' days' : '–', ps.avgLen ? 'duration' : 'add an end date')}
+      ${stat('Periods logged', ps.list.length)}
+      ${stat('Pads per period day', padDays && padTotal ? (padTotal / padDays).toFixed(1) : '–', padTotal ? plural(padTotal, 'pad') + ' in total' : '')}
+    </div>
+    <div class="chart-grid">
+      ${chart('Cycle length (days)', cyc.length ? barChart(cyc, Math.max(...cyc.map(x => x.value))) : none)}
+      ${chart('Period duration (days)', dur.length ? barChart(dur, Math.max(...dur.map(x => x.value))) : none)}
+      ${chart('Flow trend – average on each period day', flowTrend.length ? barChart(flowTrend, 4) : none)}
+      ${chart('Pain trend – average per period (0–10)', painPer.length ? barChart(painPer, 10) : none)}
+      ${chart('Pad usage per period', padsPer.length ? barChart(padsPer, Math.max(...padsPer.map(x => x.value))) : none)}
+      ${chart(`Symptoms, ${fmtShort(ui.rep.from)} to ${fmtShort(ui.rep.to)}`, Object.keys(count).length ? hBars(top(count)) : none)}
+      ${chart('Mood in the same dates', Object.keys(moods).length ? hBars(top(moods)) : none)}
+    </div>`;
 }
 
 const csvCell = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
@@ -1233,6 +1552,12 @@ function csvDoses() {
     r.dose.date, r.dose.time, r.dose.med.person, r.dose.med.name, r.dose.med.type, r.dose.med.dose, r.dose.label, r.dose.med.food, STATUS_LABEL[r.status], r.log?.takenAt || ''
   ].map(csvCell).join(','));
   downloadText(`medicine-report_${ui.rep.from}_to_${ui.rep.to}.csv`, [head.map(csvCell).join(','), ...lines].join('\r\n'));
+}
+function csvDays() {
+  const head = ['Date', 'Person', 'Flow', 'Pain (0-10)', 'Mood', 'Symptoms', 'Pads', 'Pad type', 'Notes'];
+  const lines = Object.values(S.days).filter(d => personOk(d.person)).sort((a, b) => a.date.localeCompare(b.date)).map(d =>
+    [d.date, d.person, d.flow, d.pain, d.mood, d.symptoms.join('; '), d.pads, d.padType, d.notes].map(csvCell).join(','));
+  downloadText('daily-log.csv', [head.map(csvCell).join(','), ...lines].join('\r\n'));
 }
 function csvPeriods() {
   const head = ['Person', 'Start', 'End', 'Days', 'Flow', 'Pain (0-5)', 'Notes'];
@@ -1369,6 +1694,7 @@ function renderSettings() {
   $('#urlWrap').hidden = !!CFG.WEB_APP_URL;
   $('#sSheet').value = S.settings.sheetUrl; $('#sPerson').value = S.settings.person;
   $('#accountCard').hidden = !configured();
+  $('#pwForm').hidden = !(authed() && !S.auth.admin);
   $('#accountUser').textContent = S.auth ? S.auth.user + (lockedPerson() ? ` (${lockedPerson()})` : '') : '';
   $('#backendCard').hidden = !!lockedPerson();                 // only the owner connects the Sheet
   $('#sPersonWrap').hidden = !!lockedPerson();
@@ -1398,6 +1724,11 @@ async function movePerson() {
   S.medicines.forEach(m => { if (m.person === from) { m.person = to; n++; enqueue({ op: 'upsert', sheet: 'Medicines', row: medToRow(m) }); } });
   Object.values(S.logs).forEach(l => { if (l.person === from) { l.person = to; enqueue({ op: 'upsert', sheet: 'DoseLog', row: l }); } });
   S.periods.forEach(p => { if (p.person === from) { p.person = to; n++; enqueue({ op: 'upsert', sheet: 'Periods', row: periodToRow(p) }); } });
+  Object.values(S.days).filter(d => d.person === from).forEach(d => {
+    delete S.days[d.id]; enqueue({ op: 'delete', sheet: 'DayLog', id: d.id });
+    const id = dayKey(to, d.date);
+    if (!S.days[id]) { S.days[id] = { ...d, id, person: to }; n++; enqueue({ op: 'upsert', sheet: 'DayLog', row: dayToRow(S.days[id]) }); }
+  });
   S.files.forEach(f => { if (f.person === from) { f.person = to; n++; if (f.driveId) enqueue({ op: 'upsert', sheet: 'Files', row: fileToRow(f) }); } });
   if ((S.settings.person || 'Me') === from) S.settings.person = to;
   if (S.ui.person === from) S.ui.person = '*';
@@ -1449,8 +1780,8 @@ async function connectCore() {
   try {
     const ping = await api('ping');
     const all = await api('getAll');
-    const remote = (all.medicines?.length || 0) + (all.logs?.length || 0) + (all.periods?.length || 0) + (all.files?.length || 0);
-    const local = S.medicines.length + Object.keys(S.logs).length + S.periods.length + S.files.length;
+    const remote = (all.medicines?.length || 0) + (all.logs?.length || 0) + (all.periods?.length || 0) + (all.days?.length || 0) + (all.files?.length || 0);
+    const local = S.medicines.length + Object.keys(S.logs).length + S.periods.length + Object.keys(S.days).length + S.files.length;
     if (remote && local && !(await ask('The Google Sheet already has data and this device also has data.\n\n“Use the Sheet” replaces what is on this device.\n“Keep this device” uploads it into the Sheet (merged by ID).', { title: 'Two sets of records', ok: 'Use the Sheet', cancel: 'Keep this device' }))) {
       queueAll(); await flush(); await pull();
     } else if (remote) {
@@ -1476,6 +1807,9 @@ async function addSample() {
   [-70, -42, -14].forEach(off => {
     const s = addDays(t, off), pr = { id: uid('p_'), person: p, startDate: s, endDate: addDays(s, 4), flow: 'Medium', pain: 2, notes: '' };
     S.periods.push(pr); enqueue({ op: 'upsert', sheet: 'Periods', row: periodToRow(pr) });
+    const flows = ['Spotting', 'Medium', 'Heavy', 'Heavy', 'Light'], pains = [2, 5, 7, 6, 3], moods = ['Tired', 'Irritable', 'Low', 'Okay', 'Calm'], pads = [1, 3, 5, 4, 2];
+    const symp = [['Fatigue'], ['Cramps', 'Back pain'], ['Cramps', 'Headache', 'Bloating'], ['Cramps'], []];
+    flows.forEach((f, i) => storeDay({ ...blankDay(p, addDays(s, i)), flow: f, pain: pains[i], mood: moods[i], symptoms: symp[i], pads: pads[i], padType: i === 3 ? 'Overnight' : i === 2 ? 'Large' : 'Regular', notes: i === 2 ? 'Rest day, heat pad helped' : '' }));
   });
   let i = 0;
   [addDays(t, -2), addDays(t, -1)].forEach(date => dosesOn(date, p).forEach(d => {
@@ -1512,11 +1846,17 @@ function bind() {
   $('#loginForm').addEventListener('submit', doLogin);
   $('#showPass').addEventListener('change', e => { $('#loginPass').type = e.target.checked ? 'text' : 'password'; });
   $('#logoutBtn').onclick = logout;
+  $('#forgotLink').onclick = () => forgotView(true);
+  $('#fgBack').onclick = () => forgotView(false);
+  $('#forgotForm').addEventListener('submit', sendResetCode);
+  $('#fgReset').onclick = resetPassword;
+  $('#pwForm').addEventListener('submit', changePassword);
 
   // global delegation for data-go / data-act / data-close
   document.addEventListener('click', e => {
     const goBtn = e.target.closest('[data-go]'); if (goBtn) return go(goBtn.dataset.go);
     const close = e.target.closest('[data-close]'); if (close) return close.closest('dialog').close();
+    if (dayDialogClick(e)) return;
     const dayBtn = e.target.closest('[data-day]'); if (dayBtn) return gotoDay(dayBtn.dataset.day);
     const mf = e.target.closest('[data-medfilter]'); if (mf) { ui.medFilter = mf.dataset.medfilter; return renderMeds(); }
     const b = e.target.closest('[data-act]'); if (!b) return;
@@ -1530,6 +1870,13 @@ function bind() {
     else if (act === 'pedit') openPeriodDialog(id);
     else if (act === 'pdel') deletePeriod(id);
     else if (act === 'endperiod') endPeriodToday(id);
+    else if (act === 'dayopen') openDayDialog(b.dataset.date);
+    else if (act === 'flow') quickFlow(b.dataset.flow);
+    else if (act === 'padplus') quickPads(1);
+    else if (act === 'padminus') quickPads(-1);
+    else if (act === 'calprev') shiftMonth(-1);
+    else if (act === 'calnext') shiftMonth(1);
+    else if (act === 'perview') { ui.perView = b.dataset.view; renderPeriods(); }
     else if (act === 'dopen') openDoc(id);
     else if (act === 'ddown') downloadDoc(id);
     else if (act === 'dedit') openDocDialog(id);
@@ -1557,11 +1904,26 @@ function bind() {
     const k = b.dataset.preset; addTimeRow(k === 'Daily' && $('#mRepeat').value !== 'daily' ? 'Dose' : k, PRESETS[k]);
   }));
 
-  // periods
+  // periods and the daily log
+  $('#logDayBtn').onclick = () => openDayDialog(todayStr());
+  $('#dayForm').addEventListener('submit', saveDay);
+  $('#dyDel').onclick = deleteDay;
+  $('#dyNotes').addEventListener('input', e => { if (dayDraft) dayDraft.notes = e.target.value; });
+  $('#dyPain').addEventListener('input', e => { dayDraft.pain = +e.target.value; $('#dyPainOut').textContent = `${dayDraft.pain} / 10 · ${painWord(dayDraft.pain)}`; });
+  $('#dyPlus').onclick = () => { dayDraft.pads = Math.min(40, dayDraft.pads + 1); $('#dyPads').textContent = dayDraft.pads; };
+  $('#dyMinus').onclick = () => { dayDraft.pads = Math.max(0, dayDraft.pads - 1); $('#dyPads').textContent = dayDraft.pads; };
+  $('#dyType').addEventListener('change', e => { dayDraft.padType = e.target.value; });
+  document.addEventListener('change', e => {
+    if (e.target.id === 'quickPadType') { const p = periodPerson(), t = todayStr(), d = dayOf(p, t); if (d) patchDay(p, t, { padType: e.target.value }); else patchDay(p, t, { padType: e.target.value, pads: 0 }); }
+    else if (e.target.id === 'perSel') { ui.perSel = e.target.value; renderPeriods(); }
+  });
+  const rc = () => renderPeriods();
+  $('#rcMonth').addEventListener('change', e => { const v = e.target.value; if (!v) return; const [y, m] = v.split('-').map(Number); ui.rec = { from: `${v}-01`, to: `${v}-${pad(new Date(y, m, 0).getDate())}`, year: '' }; rc(); });
+  $('#rcYear').addEventListener('change', e => { const y = e.target.value; ui.rec = y ? { from: `${y}-01-01`, to: `${y}-12-31`, year: y } : { from: '2000-01-01', to: todayStr(), year: '' }; rc(); });
+  ['#rcFrom', '#rcTo'].forEach(sel => $(sel).addEventListener('change', () => { const f = $('#rcFrom').value || ui.rec.from, t = $('#rcTo').value || ui.rec.to; ui.rec = { from: f, to: t < f ? f : t, year: '' }; rc(); }));
+  $('#rcSort').addEventListener('change', e => { S.ui.recSort = e.target.value; save(); rc(); });
   $('#addPeriodBtn').onclick = () => openPeriodDialog();
   $('#periodForm').addEventListener('submit', savePeriod);
-  const shift = n => { const [y, m] = ui.calMonth.split('-').map(Number); const d = new Date(y, m - 1 + n, 1); ui.calMonth = `${d.getFullYear()}-${pad(d.getMonth() + 1)}`; renderPeriods(); };
-  $('#calPrev').onclick = () => shift(-1); $('#calNext').onclick = () => shift(1);
 
   // reports
   const rep = () => { ui.rep.from = $('#rFrom').value || ui.rep.from; ui.rep.to = $('#rTo').value || ui.rep.to; ui.rep.med = $('#rMed').value; if (ui.rep.from > ui.rep.to) ui.rep.to = ui.rep.from; renderReports(); };
@@ -1572,7 +1934,7 @@ function bind() {
     ui.rep.from = r === 'today' ? t : r === 'month' ? t.slice(0, 8) + '01' : addDays(t, -(parseInt(r, 10) - 1));
     renderReports();
   }));
-  $('#csvDosesBtn').onclick = csvDoses; $('#csvPeriodsBtn').onclick = csvPeriods;
+  $('#csvDosesBtn').onclick = csvDoses; $('#csvPeriodsBtn').onclick = csvPeriods; $('#csvDaysBtn').onclick = csvDays;
   $('#printBtn').onclick = () => window.print();
 
   // report files
@@ -1612,21 +1974,21 @@ function bind() {
     await Notification.requestPermission(); notifyState(); beep();
   };
   $('#sampleBtn').onclick = () => addSample();
-  $('#exportBtn').onclick = () => downloadText(`medicine-monitor-backup_${todayStr()}.json`, JSON.stringify({ medicines: S.medicines, logs: S.logs, periods: S.periods, files: S.files }, null, 2), 'application/json', false);
+  $('#exportBtn').onclick = () => downloadText(`medicine-monitor-backup_${todayStr()}.json`, JSON.stringify({ medicines: S.medicines, logs: S.logs, periods: S.periods, days: S.days, files: S.files }, null, 2), 'application/json', false);
   $('#importFile').addEventListener('change', async e => {
     const file = e.target.files[0]; e.target.value = ''; if (!file) return;
     try {
       const d = JSON.parse(await file.text());
       if (!Array.isArray(d.medicines)) throw new Error('not a backup file');
       if (!(await ask('Replace the data on this device with this backup?', { title: 'Restore backup', ok: 'Replace' }))) return;
-      S.medicines = d.medicines; S.logs = d.logs || {}; S.periods = d.periods || []; S.files = (d.files || []).filter(f => f.driveId);
+      S.medicines = d.medicines; S.logs = d.logs || {}; S.periods = d.periods || []; S.days = d.days || {}; S.files = (d.files || []).filter(f => f.driveId);
       save(); renderAll(); toast('Backup restored');
       if (configured()) { queueAll(); flush(); }
     } catch (er) { toast('Could not read the backup: ' + er.message, 'err'); }
   });
   $('#clearBtn').onclick = async () => {
     if (!(await ask('Clear all medicines, history, periods and files on THIS device?\n(The Google Sheet is not changed.)', { title: 'Clear this device', ok: 'Clear', danger: true }))) return;
-    S.medicines = []; S.logs = {}; S.periods = []; S.files = []; S.queue = [];
+    S.medicines = []; S.logs = {}; S.periods = []; S.days = {}; S.files = []; S.queue = [];
     await idb.clear(); save(); renderAll(); toast('This device is cleared');
   };
 

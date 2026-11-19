@@ -209,3 +209,20 @@ Anyone you add in the **Users** tab of the Google Sheet gets a login that shows 
 - **Never** put your password into any file you upload to GitHub. It belongs only in *Script properties*.
 - Keep the Google Sheet and the Drive folder **private** (not shared with anyone).
 - Use a long password. Anyone who knows it can read your records.
+
+## Period tracker, daily log and passwords (new)
+
+- **Periods tab** – a summary card (period start / end, cycle length, next period, current cycle day), one-tap flow for today
+  (Spotting / Light / Medium / Heavy), a pad counter, and three views: Calendar, Timeline and Trend charts.
+  Tap any day to add flow, pain (0–10), mood, symptoms, pads and notes. Medicines taken that day are shown with it.
+- **Daily records** – every logged day as a card, filtered by month, year or your own dates. **Reports** adds cycle and
+  period analytics (average cycle, average period, flow / pain / pad / symptom trends) and a **Daily log CSV** for Excel.
+- **Google Sheet** – a new tab **DayLog** is created automatically. After pasting the new `backend/Code.gs`, deploy a
+  **new version** (Deploy > Manage deployments > Edit > New version). Until then the daily log stays on the device and is
+  uploaded by itself once the new version is live.
+- **Forgot password** – on the sign-in screen, "Forgot password?" asks for the user name or e-mail and e-mails an
+  8-character code (valid 15 minutes, five wrong guesses cancel it) to the address in the **Users** tab. The old password keeps
+  working until the code is used. Fill the **email** column in the Users tab for everyone who may need this.
+- **Change password** – Settings > Account (for logins from the Users tab). The owner's password is changed in
+  Apps Script: Project Settings > Script properties > `APP_PASSWORD`.
+- Accounts are still created only by you in the **Users** tab, so strangers cannot register in your Sheet.

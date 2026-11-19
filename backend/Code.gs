@@ -27,6 +27,8 @@ var SHEETS = {
   Medicines: ['id', 'person', 'name', 'type', 'dose', 'startDate', 'days', 'noEnd', 'times', 'food', 'notes', 'createdAt', 'repeat'],
   DoseLog:   ['id', 'medId', 'person', 'medicine', 'date', 'slot', 'time', 'status', 'takenAt'],
   Periods:   ['id', 'person', 'startDate', 'endDate', 'flow', 'pain', 'notes'],
+  // one row per person per day: flow level, pain 0-10, mood, symptoms, notes and pads used. id = person|date
+  DayLog:    ['id', 'person', 'date', 'flow', 'pain', 'mood', 'symptoms', 'notes', 'pads', 'padType'],
   // uploaded report files (image / PDF). The file itself lives in Google Drive, this row is its record.
   Files:     ['id', 'person', 'title', 'category', 'date', 'notes', 'fileName', 'mime', 'size', 'driveId', 'driveUrl', 'thumb', 'createdAt']
 };
@@ -48,6 +50,8 @@ function doPost(e) {
     lock.waitLock(25000);
     try {
       if (req.action === 'login') out = login_(req);
+      else if (req.action === 'forgot') out = forgot_(req);           // no sign-in needed: e-mails a reset code
+      else if (req.action === 'resetPassword') out = resetPassword_(req);
       else {
         var ctx = checkToken_(req.token);             // every other call needs a valid sign-in
         out = req.action === 'logout' ? logout_(req) : handle_(req, ctx);
@@ -65,7 +69,9 @@ function handle_(req, ctx) {
     case 'ping':
       return { ok: true, message: 'Connected', user: ctx.admin ? Session.getEffectiveUser().getEmail() : ctx.user };
     case 'getAll':
-      return { ok: true, medicines: mine_('Medicines', ctx), logs: mine_('DoseLog', ctx), periods: mine_('Periods', ctx), files: mine_('Files', ctx) };
+      return { ok: true, medicines: mine_('Medicines', ctx), logs: mine_('DoseLog', ctx), periods: mine_('Periods', ctx), days: mine_('DayLog', ctx), files: mine_('Files', ctx) };
+    case 'changePassword':
+      return changePassword_(req, ctx);
     case 'bulk':
       return applyOps_(req.ops || [], ctx);
     case 'uploadFile':
@@ -209,6 +215,82 @@ function checkToken_(token) {
   if (!u || !u.passHash) throw authError_();
   return { user: u.user, person: u.person, admin: false };
 }
+
+/* ----- forgot / change password (people from the Users tab; the owner's password lives in Script properties) -----
+ * Forgot: the person types their user name or e-mail. If it matches, a code is mailed to the address in the Users tab.
+ * The old password keeps working until the code is used, so a stranger cannot lock anyone out by asking for codes.
+ * The reply is the same whether or not the name exists, so nobody can find out who has an account. */
+function findUser_(text) {
+  var t = String(text || '').trim().toLowerCase().slice(0, 100);
+  if (!t) return null;
+  return users_().filter(function (u) { return u.user.toLowerCase() === t || (u.email && u.email.toLowerCase() === t); })[0] || null;
+}
+
+function setPassword_(userName, plain) {
+  var sh = usersSheet_(), last = sh.getLastRow();
+  if (last < 2) return false;
+  var names = sh.getRange(2, 1, last - 1, 1).getValues();
+  for (var i = 0; i < names.length; i++) {
+    if (String(names[i][0]).trim() === userName) { sh.getRange(i + 2, 4).setValue(plain); users_(); return true; }   // users_() hashes it at once
+  }
+  return false;
+}
+
+function dropSessionsOf_(userName) {
+  var s = sessions_();
+  Object.keys(s).forEach(function (k) { if (s[k] && s[k].u === userName && s[k].r !== 'admin') delete s[k]; });
+  saveSessions_(s);
+}
+
+function forgot_(req) {
+  var cache = CacheService.getScriptCache();
+  var all = parseInt(cache.get('forgot_all') || '0', 10);
+  var generic = { ok: true, message: 'If that user name or e-mail is registered, a reset code has been e-mailed. It works for 15 minutes.' };
+  if (all >= 20) throw new Error('Too many requests. Please try again in an hour.');
+  cache.put('forgot_all', String(all + 1), 3600);
+  var u = findUser_(req.user);
+  if (!u || !u.email) { Utilities.sleep(800); return generic; }
+  var key = 'forgot_' + hash_(u.user.toLowerCase()).slice(0, 24), n = parseInt(cache.get(key) || '0', 10);
+  if (n >= 3) return generic;                                  // at most 3 codes an hour for one person
+  cache.put(key, String(n + 1), 3600);
+  var code = Utilities.getUuid().replace(/-/g, '').slice(0, 8).toUpperCase();
+  cache.put('reset_' + hash_(u.user.toLowerCase()).slice(0, 24), hash_(code), 900);
+  cache.remove('resetTry_' + hash_(u.user.toLowerCase()).slice(0, 24));
+  MailApp.sendEmail({ to: u.email, name: 'Medicine & Period Monitor', subject: 'Your password reset code',
+    htmlBody: '<p>Hello ' + esc_(u.person) + ',</p><p>Your password reset code is:</p><p style="font-size:24px;letter-spacing:3px"><b>' + code + '</b></p>' +
+      '<p>It works for 15 minutes. If you did not ask for it, ignore this mail: your password has not changed.</p>' });
+  return generic;
+}
+
+function resetPassword_(req) {
+  var cache = CacheService.getScriptCache(), u = findUser_(req.user), pw = String(req.newPassword || '');
+  var bad = new Error('That code is wrong or has expired. Ask for a new one.');
+  if (pw.length < 8 || pw.length > 100) throw new Error('Choose a password of at least 8 characters.');
+  if (!u) { Utilities.sleep(800); throw bad; }
+  var id = hash_(u.user.toLowerCase()).slice(0, 24), tries = parseInt(cache.get('resetTry_' + id) || '0', 10);
+  var want = cache.get('reset_' + id);
+  if (!want || tries >= 5) throw bad;
+  if (!safeEqual_(hash_(String(req.code || '').trim().toUpperCase()), want)) {
+    cache.put('resetTry_' + id, String(tries + 1), 900);
+    Utilities.sleep(800);
+    throw bad;
+  }
+  cache.remove('reset_' + id);
+  setPassword_(u.user, pw);
+  dropSessionsOf_(u.user);                                     // anyone signed in with the old password is signed out
+  return { ok: true, message: 'Password changed. You can sign in now.' };
+}
+
+function changePassword_(req, ctx) {
+  if (ctx.admin) throw new Error('The owner password is changed in Apps Script: Project Settings > Script properties > APP_PASSWORD.');
+  var u = users_().filter(function (x) { return x.user === ctx.user; })[0], pw = String(req.newPassword || '');
+  if (pw.length < 8 || pw.length > 100) throw new Error('Choose a new password of at least 8 characters.');
+  var parts = String(u && u.passHash ? u.passHash : 'none$none').split('$');
+  if (!u || !safeEqual_(slowHash_(parts[0], String(req.oldPassword || '')), parts[1] || '')) { Utilities.sleep(1000); throw new Error('Your current password is wrong.'); }
+  setPassword_(u.user, pw);
+  return { ok: true, message: 'Password changed.' };
+}
+
 
 function logout_(req) {
   var s = sessions_();
