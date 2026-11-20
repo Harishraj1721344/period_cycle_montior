@@ -626,3 +626,4 @@ button.cal-day { font: inherit; background: none; color: var(--ink); cursor: poi
   .rec-date { width: 48px; }
   #dyDel { margin-right: 0; flex: 1 0 100%; }
 }
+.person-pick.static > select { appearance: none; -webkit-appearance: none; background-image: none; padding: 4px 10px 4px 2px; pointer-events: none; opacity: 1; }

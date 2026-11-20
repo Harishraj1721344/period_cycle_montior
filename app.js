@@ -122,11 +122,12 @@ let locked = false;                              // true while the sign-in scree
 // A login from the Users tab is tied to one person: it sees and saves only that person's records
 // (the backend enforces this; here it only keeps the screens tidy). The owner's login sees everyone.
 const lockedPerson = () => authed() && !S.auth.admin && S.auth.person ? S.auth.person : '';
-// The owner's login named like one of the people (login "nithya", person "Nithya") opens on that person only.
+// The app always opens on this person only; there is no "Everyone" list. Records saved under another
+// name (for example "Me") stay hidden until they are moved here (Settings > Move records to another name).
+const PRIMARY_PERSON = 'Nithya';
 const tiedPerson = () => {
   if (!authed() || lockedPerson()) return '';
-  const u = String(S.auth.user || '').trim().toLowerCase();
-  return persons().find(p => p.toLowerCase() === u) || '';
+  return persons().find(p => p.toLowerCase() === PRIMARY_PERSON.toLowerCase()) || PRIMARY_PERSON;
 };
 const defaultPerson = () => lockedPerson() || (S.ui.person !== '*' ? S.ui.person : persons().length === 1 ? persons()[0] : (S.settings.person || 'Me'));
 const periodPerson = defaultPerson;
@@ -792,6 +793,7 @@ function renderHeader() {
   if (only) S.ui.person = tied || '*';                            // tied: other names stay out of every screen
   sel.innerHTML = only ? `<option value="${esc(S.ui.person)}">${esc(only)}</option>` : `<option value="*">Everyone</option>` + list.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
   sel.value = S.ui.person; sel.disabled = !!only;
+  sel.parentElement.classList.toggle('static', !!only);          // just the name, no drop-down arrow
   ['#mPerson', '#pPerson', '#dPerson'].forEach(s => { $(s).readOnly = !!me; });
   $('#personList').innerHTML = list.map(p => `<option value="${esc(p)}">`).join('');
   renderPill();
